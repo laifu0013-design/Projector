@@ -278,7 +278,12 @@ function upsertSession(s) {
 }
 
 function notify(text) {
-  if (document.hasFocus() || !("Notification" in window) || Notification.permission !== "granted") return;
+  if (document.hasFocus()) return;
+  if (window.__TAURI__) {  // 桌面软件里走 Tauri 通知插件
+    window.__TAURI__.core.invoke("plugin:notification|notify", { options: { title: "Claude 工作台", body: text } }).catch(() => {});
+    return;
+  }
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
   try { new Notification("Claude 工作台", { body: text }); } catch {}
 }
 
@@ -314,7 +319,7 @@ async function send() {
   const text = $("input").value.trim();
   if (!text || $("sendBtn").disabled) return;
   $("sendBtn").disabled = true;
-  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+  if (!window.__TAURI__ && "Notification" in window && Notification.permission === "default") Notification.requestPermission();
   try {
     if (!current) {
       const s = await api("/api/sessions", { method: "POST", body: JSON.stringify({ title: text.slice(0, 20), author: me }) });

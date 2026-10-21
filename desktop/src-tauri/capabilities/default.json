@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "本地设置页（服务器地址、服务端模式）",
+  "windows": ["main"],
+  "permissions": ["core:default", "notification:default"]
+}

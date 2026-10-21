@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude 工作台 - 设置</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f5f4ef; --card: #fff; --fg: #1f1e1d; --muted: #6b6a66; --line: #dcd9d0; --accent: #d97757; --err: #c0392b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1f1e1d; --card: #2a2927; --fg: #eeece6; --muted: #a3a19b; --line: #44423e; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
+         font: 15px/1.6 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; padding: 16px; }
+  .card { width: 100%; max-width: 480px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+  label { display: block; font-weight: 600; margin: 16px 0 6px; }
+  input[type=text] { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
+  input[type=text]:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .check { display: flex; gap: 8px; align-items: flex-start; font-weight: 600; margin-top: 20px; cursor: pointer; }
+  .check input { margin-top: 5px; }
+  #serverBox { display: none; border-left: 3px solid var(--line); padding-left: 12px; }
+  button { margin-top: 24px; width: 100%; padding: 10px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #status { min-height: 1.6em; margin-top: 12px; font-size: 13px; }
+  #status.err { color: var(--err); }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>连接 Claude 工作台</h1>
+  <p class="sub">填写台式机上中心服务的地址，之后打开软件会直接进入网页端。以后可以在托盘图标的菜单里修改。</p>
+
+  <label for="url">服务器地址</label>
+  <input id="url" type="text" value="http://localhost:8080" spellcheck="false">
+  <div class="hint">台式机本机填 http://localhost:8080；其他电脑填 http://台式机IP:8080</div>
+
+  <label class="check"><input id="mode" type="checkbox"><span>服务端模式（只在台式机上勾选）<br>
+    <span class="hint" style="font-weight:400">开机自动在后台启动中心服务和小智连接，崩溃后自动重启</span></span></label>
+  <div id="serverBox">
+    <label for="dir">项目文件夹</label>
+    <input id="dir" type="text" placeholder="例如 D:\Projector\esp32-claude-bridge" spellcheck="false">
+    <div class="hint">server.py 和 config.bat 所在的文件夹</div>
+  </div>
+
+  <button id="save">保存并连接</button>
+  <div id="status"></div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const invoke = window.__TAURI__ && window.__TAURI__.core.invoke;
+
+function setStatus(text, err) { $("status").textContent = text; $("status").className = err ? "err" : ""; }
+$("mode").onchange = () => { $("serverBox").style.display = $("mode").checked ? "block" : "none"; };
+
+async function load() {
+  if (!invoke) return setStatus("这个页面需要在 Claude 工作台桌面软件里打开", true);
+  const cfg = await invoke("get_config");
+  if (cfg.server_url) $("url").value = cfg.server_url;
+  $("mode").checked = cfg.server_mode;
+  $("dir").value = cfg.project_dir;
+  $("mode").onchange();
+}
+
+$("save").onclick = async () => {
+  $("save").disabled = true;
+  setStatus("正在连接…");
+  try {
+    await invoke("save_config", { serverUrl: $("url").value.trim(), serverMode: $("mode").checked, projectDir: $("dir").value.trim() });
+    setStatus($("mode").checked ? "已保存，正在启动中心服务…" : "已保存，正在打开…");
+  } catch (e) {
+    setStatus(String(e), true);
+    $("save").disabled = false;
+  }
+};
+$("url").onkeydown = $("dir").onkeydown = e => { if (e.key === "Enter") $("save").click(); };
+load();
+</script>
+</body>
+</html>
