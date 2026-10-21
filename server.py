@@ -1,6 +1,6 @@
 """台式机中心服务：管理多个 Claude 会话，供局域网网页端和小智语音共同使用。
 
-运行：python server.py   （配置见 start.bat 里的环境变量）
+运行：python server.py   （配置见 config.bat 里的环境变量）
 """
 import asyncio
 import json
@@ -22,24 +22,33 @@ from pydantic import BaseModel
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-DATA.mkdir(exist_ok=True)
+(DATA / "mcp").mkdir(parents=True, exist_ok=True)
 
 WORK_DIR = os.environ.get("CLAUDE_WORK_DIR", "D:\\")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 PORT = int(os.environ.get("CENTER_PORT", "8080"))
-TASK_TIMEOUT = float(os.environ.get("CLAUDE_TASK_TIMEOUT", "1800"))
+TASK_TIMEOUT = float(os.environ.get("CLAUDE_TASK_TIMEOUT", "3600"))
+APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT", "1800"))
 
-# 默认只读；allow_edit 时才允许改文件。始终禁止 Bash（删除、运行程序都要靠它）。
+# 自动放行的操作；其余操作（删除、移动、运行程序、其他命令等）都要有人确认。
 # 用 DeepSeek 等第三方模型时 WebSearch 不可用，所以不放进来。
 READ_TOOLS = ["Read", "Glob", "Grep", "WebFetch"]
-EDIT_TOOLS = READ_TOOLS + ["Edit", "Write"]
+SAFE_BASH = [
+    "Bash(ls:*)", "Bash(pwd)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+]
+EDIT_TOOLS = ["Edit", "Write"]
 
-WEB_HINT = "用户在电脑网页上和你对话，工作目录是用户的文件库。回答用中文。"
+WEB_HINT = (
+    "用户在电脑网页上和你对话，工作目录是用户的文件库。回答用中文。"
+    "删除、移动文件和执行命令会弹窗让用户确认；被拒绝时不要换个方式重试同样的操作，先问用户。"
+)
 VOICE_HINT = (
     "用户是通过一块 2 寸小屏幕的语音助手给你下指令的，指令经过语音识别和另一个助手转述，可能有错字。"
     "你的最终回答会显示在小屏幕上并被朗读：用中文给出 150 字以内的结论，"
-    "不要用 Markdown 表格、代码块或长列表。较长的内容在有写权限时写进文件，只告诉用户路径；"
-    "需要修改文件但没有写权限时，直接说明需要用户确认开启修改。"
+    "不要用 Markdown 表格、代码块或长列表。较长的内容写进文件，只告诉用户路径。"
+    "修改文件和执行命令需要用户口头确认，尽量把需要确认的操作合并成一次；被拒绝时不要重试同样的操作。"
 )
 
 
@@ -71,6 +80,11 @@ _db.executescript(
     CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_id);
     """
 )
+for _col in ("bypass INTEGER DEFAULT 0", "created_by TEXT DEFAULT ''"):
+    try:
+        _db.execute(f"ALTER TABLE sessions ADD COLUMN {_col}")
+    except sqlite3.OperationalError:
+        pass  # 列已存在
 
 
 def db(sql: str, args=(), one=False):
@@ -82,7 +96,7 @@ def db(sql: str, args=(), one=False):
 
 
 def session_view(s: dict) -> dict:
-    return {**s, "running": s["id"] in RUNS}
+    return {**s, "running": s["id"] in RUNS, "pending": len(pending_for(s["id"]))}
 
 
 def get_session(sid: str) -> dict:
@@ -92,13 +106,22 @@ def get_session(sid: str) -> dict:
     return s
 
 
-def create_session(title: str, source: str) -> dict:
+def push_session(sid: str) -> None:
+    s = db("SELECT * FROM sessions WHERE id=?", (sid,), one=True)
+    if s:
+        broadcast({"type": "session", "session": session_view(s)})
+
+
+def create_session(title: str, source: str, created_by: str = "") -> dict:
     now = time.time()
     sid = uuid.uuid4().hex[:12]
-    db("INSERT INTO sessions VALUES (?,?,?,?,?,?)", (sid, title, source, None, now, now))
-    s = get_session(sid)
-    broadcast({"type": "session", "session": session_view(s)})
-    return s
+    db(
+        "INSERT INTO sessions (id, title, source, claude_session, created, updated, bypass, created_by) "
+        "VALUES (?,?,?,?,?,?,0,?)",
+        (sid, title, source, None, now, now, created_by),
+    )
+    push_session(sid)
+    return get_session(sid)
 
 
 def add_message(sid: str, role: str, content: str, meta: dict | None = None) -> dict:
@@ -111,7 +134,7 @@ def add_message(sid: str, role: str, content: str, meta: dict | None = None) -> 
     msg = db("SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 1", (sid,), one=True)
     msg["meta"] = json.loads(msg["meta"])
     broadcast({"type": "message", "session_id": sid, "message": msg})
-    broadcast({"type": "session", "session": session_view(get_session(sid))})
+    push_session(sid)
     return msg
 
 
@@ -125,13 +148,48 @@ def broadcast(event: dict) -> None:
         q.put_nowait(event)
 
 
+# ---------- 权限确认 ----------
+
+APPROVALS: dict[str, dict] = {}
+
+
+def pending_for(sid: str) -> list[dict]:
+    return [a for a in APPROVALS.values() if a["session_id"] == sid]
+
+
+def approval_public(a: dict) -> dict:
+    return {k: v for k, v in a.items() if k != "future"}
+
+
+def approval_summary(tool: str, inp: dict) -> str:
+    if tool == "Bash":
+        return f"运行命令：{inp.get('command', '')}"
+    if tool == "Write":
+        return f"新建或覆盖文件：{inp.get('file_path', '')}"
+    if tool == "Edit":
+        return f"修改文件：{inp.get('file_path', '')}"
+    detail = next((str(inp[k]) for k in ("file_path", "path", "url", "command") if inp.get(k)), "")
+    return f"使用 {tool}" + (f"：{detail}" if detail else "")
+
+
+def resolve_approval(aid: str, allow: bool, by: str = "", message: str = "") -> dict:
+    a = APPROVALS.get(aid)
+    if not a:
+        raise HTTPException(404, "这个确认请求已经处理过或已过期")
+    if not a["future"].done():
+        a["future"].set_result((allow, message or ("" if allow else "用户拒绝了这个操作，不要重试同样的操作")))
+    who = f"（{by}）" if by else ""
+    add_message(a["session_id"], "event", f"{'✔ 已同意' if allow else '✘ 已拒绝'}{who}：{a['summary']}")
+    return a
+
+
 # ---------- 调用 Claude Code（以后换别的 agent 工具，只改这一段） ----------
 
 
-def _tool_detail(name: str, args: dict) -> str:
-    for key in ("file_path", "path", "pattern", "url"):
+def _tool_detail(args: dict) -> str:
+    for key in ("file_path", "path", "pattern", "url", "command"):
         if args.get(key):
-            return str(args[key])
+            return str(args[key])[:200]
     return ""
 
 
@@ -145,21 +203,46 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def run_claude(run: "Run", prompt: str, resume_id: str | None, allow_edit: bool, hint: str, emit) -> dict:
-    """在线程里运行 claude，逐行解析 stream-json 事件，通过 emit 回传；返回最终结果。"""
+def build_command(sess: dict, hint: str) -> list[str]:
     cmd = [
         CLAUDE_BIN, "-p",
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-        "--allowedTools", ",".join(EDIT_TOOLS if allow_edit else READ_TOOLS),
-        "--disallowedTools", "Bash",
         "--append-system-prompt", hint,
     ]
-    if resume_id:
-        cmd += ["--resume", resume_id]
+    if sess["bypass"]:
+        cmd += ["--permission-mode", "bypassPermissions"]
+    else:
+        # 语音会话改文件也要确认；网页会话改文件自动放行
+        auto = READ_TOOLS + SAFE_BASH + ([] if sess["source"] == "voice" else EDIT_TOOLS)
+        mcp_config = DATA / "mcp" / f"{sess['id']}.json"
+        mcp_config.write_text(json.dumps({"mcpServers": {"center": {
+            "command": sys.executable,
+            "args": [str(BASE / "approval_mcp.py")],
+            "env": {
+                "CENTER_URL": f"http://127.0.0.1:{PORT}",
+                "CENTER_TOKEN": TOKEN,
+                "CENTER_SESSION": sess["id"],
+                "PYTHONUTF8": "1",
+            },
+        }}}), encoding="utf-8")
+        cmd += [
+            "--mcp-config", str(mcp_config),
+            "--permission-prompt-tool", "mcp__center__approve",
+            "--allowedTools", *auto,
+        ]
+    if sess["claude_session"]:
+        cmd += ["--resume", sess["claude_session"]]
+    return cmd
+
+
+def run_claude(run: "Run", prompt: str, cmd: list[str], emit) -> dict:
+    """在线程里运行 claude，逐行解析 stream-json 事件，通过 emit 回传；返回最终结果。"""
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", cwd=WORK_DIR,
+        # 等人确认可能要很久，放宽 MCP 工具调用的超时
+        env={**os.environ, "MCP_TOOL_TIMEOUT": str(int(APPROVAL_TIMEOUT * 1000) + 60000)},
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     run.proc = proc
@@ -190,7 +273,7 @@ def run_claude(run: "Run", prompt: str, resume_id: str | None, allow_edit: bool,
                 for block in ev.get("message", {}).get("content", []):
                     if block.get("type") == "tool_use":
                         emit({"type": "tool", "name": block.get("name"),
-                              "detail": _tool_detail(block.get("name"), block.get("input") or {})})
+                              "detail": _tool_detail(block.get("input") or {})})
             elif kind == "result":
                 final.update(ev)
         proc.wait()
@@ -231,19 +314,20 @@ def _on_event(run: Run, ev: dict) -> None:
     broadcast({**ev, "session_id": run.sid})
 
 
-async def start_turn(sid: str, text: str, allow_edit: bool, hint: str) -> Run:
+async def start_turn(sid: str, text: str, author: str = "") -> Run:
     if not CLAUDE_BIN:
         raise HTTPException(500, "台式机上找不到 claude 命令，请先安装 Claude Code")
     if sid in RUNS:
         raise HTTPException(409, "这个会话还有任务在进行，请等它完成或先停止")
     sess = get_session(sid)
     run = RUNS[sid] = Run(sid)
-    add_message(sid, "user", text, {"allow_edit": allow_edit})
-    asyncio.create_task(_drive(run, sess, text, allow_edit, hint))
+    add_message(sid, "user", text, {"author": author, "bypass": bool(sess["bypass"])})
+    hint = VOICE_HINT if sess["source"] == "voice" else WEB_HINT
+    asyncio.create_task(_drive(run, sess, text, build_command(sess, hint)))
     return run
 
 
-async def _drive(run: Run, sess: dict, text: str, allow_edit: bool, hint: str) -> None:
+async def _drive(run: Run, sess: dict, text: str, cmd: list[str]) -> None:
     loop = asyncio.get_running_loop()
 
     def emit(ev):
@@ -251,7 +335,7 @@ async def _drive(run: Run, sess: dict, text: str, allow_edit: bool, hint: str) -
 
     started = time.time()
     try:
-        final = await asyncio.to_thread(run_claude, run, text, sess["claude_session"], allow_edit, hint, emit)
+        final = await asyncio.to_thread(run_claude, run, text, cmd, emit)
     except Exception as e:
         final = {"is_error": True, "result": f"启动 claude 失败：{e}"}
     await asyncio.sleep(0)  # 让线程里排队的事件先处理完
@@ -273,9 +357,12 @@ async def _drive(run: Run, sess: dict, text: str, allow_edit: bool, hint: str) -
         run.reply = final.get("result") or run.text
         add_message(run.sid, "assistant", run.reply, meta)
 
+    for a in pending_for(run.sid):
+        if not a["future"].done():
+            a["future"].set_result((False, "任务已结束"))
     del RUNS[run.sid]
     run.done.set()
-    broadcast({"type": "session", "session": session_view(get_session(run.sid))})
+    push_session(run.sid)
 
 
 # ---------- HTTP 接口 ----------
@@ -292,21 +379,38 @@ def auth(request: Request) -> None:
 
 class NewSession(BaseModel):
     title: str = "新会话"
+    author: str = ""
 
 
-class Rename(BaseModel):
-    title: str
+class UpdateSession(BaseModel):
+    title: str | None = None
+    bypass: bool | None = None
 
 
 class Send(BaseModel):
     text: str
-    allow_edit: bool = False
+    author: str = ""
+
+
+class ApprovalRequest(BaseModel):
+    session_id: str
+    tool_name: str
+    input: dict
+
+
+class Decision(BaseModel):
+    allow: bool
+    author: str = ""
 
 
 class VoiceTask(BaseModel):
     task: str
-    allow_edit: bool = False
     continue_last: bool = False
+    wait: float = 40
+
+
+class VoiceConfirm(BaseModel):
+    allow: bool
     wait: float = 40
 
 
@@ -322,7 +426,7 @@ def list_sessions():
 
 @app.post("/api/sessions", dependencies=[Depends(auth)])
 def new_session(body: NewSession):
-    return session_view(create_session(body.title.strip()[:40] or "新会话", "web"))
+    return session_view(create_session(body.title.strip()[:40] or "新会话", "web", body.author.strip()[:20]))
 
 
 @app.get("/api/sessions/{sid}", dependencies=[Depends(auth)])
@@ -333,16 +437,25 @@ def read_session(sid: str):
         m["meta"] = json.loads(m["meta"])
     run = RUNS.get(sid)
     live = {"text": run.text, "tools": run.tools} if run else None
-    return {"session": session_view(s), "messages": msgs, "live": live}
+    return {
+        "session": session_view(s),
+        "messages": msgs,
+        "live": live,
+        "approvals": [approval_public(a) for a in pending_for(sid)],
+    }
 
 
 @app.patch("/api/sessions/{sid}", dependencies=[Depends(auth)])
-def rename_session(sid: str, body: Rename):
-    get_session(sid)
-    db("UPDATE sessions SET title=? WHERE id=?", (body.title.strip()[:40] or "未命名", sid))
-    s = session_view(get_session(sid))
-    broadcast({"type": "session", "session": s})
-    return s
+def update_session(sid: str, body: UpdateSession):
+    s = get_session(sid)
+    if body.title is not None:
+        db("UPDATE sessions SET title=? WHERE id=?", (body.title.strip()[:40] or "未命名", sid))
+    if body.bypass is not None:
+        if body.bypass and s["source"] == "voice":
+            raise HTTPException(400, "语音会话不能完全放行")
+        db("UPDATE sessions SET bypass=? WHERE id=?", (int(body.bypass), sid))
+    push_session(sid)
+    return session_view(get_session(sid))
 
 
 @app.delete("/api/sessions/{sid}", dependencies=[Depends(auth)])
@@ -352,6 +465,7 @@ def delete_session(sid: str):
         raise HTTPException(409, "任务进行中，请先停止")
     db("DELETE FROM messages WHERE session_id=?", (sid,))
     db("DELETE FROM sessions WHERE id=?", (sid,))
+    (DATA / "mcp" / f"{sid}.json").unlink(missing_ok=True)
     broadcast({"type": "session_deleted", "session_id": sid})
     return {"ok": True}
 
@@ -364,7 +478,7 @@ async def send_message(sid: str, body: Send):
         raise HTTPException(400, "内容为空")
     if s["title"] == "新会话":
         db("UPDATE sessions SET title=? WHERE id=?", (text[:20], sid))
-    await start_turn(sid, text, body.allow_edit, VOICE_HINT if s["source"] == "voice" else WEB_HINT)
+    await start_turn(sid, text, body.author.strip()[:20])
     return {"ok": True}
 
 
@@ -373,7 +487,82 @@ def stop_session(sid: str):
     run = RUNS.get(sid)
     if run and run.proc:
         run.stopped = True
+        for a in pending_for(sid):
+            if not a["future"].done():
+                a["future"].set_result((False, "用户停止了任务"))
         _kill_tree(run.proc)
+    return {"ok": True}
+
+
+@app.get("/api/sessions/{sid}/transcript", dependencies=[Depends(auth)])
+def transcript(sid: str):
+    """读取 Claude Code 自己保存的完整记录（每一步思考、工具调用和返回）。"""
+    s = get_session(sid)
+    if not s["claude_session"]:
+        return {"steps": [], "note": "这个会话还没有记录"}
+    files = list((CLAUDE_HOME / "projects").glob(f"*/{s['claude_session']}.jsonl"))
+    if not files:
+        return {"steps": [], "note": "找不到 Claude Code 的记录文件"}
+    steps = []
+    with files[0].open(encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if e.get("type") not in ("user", "assistant") or e.get("isMeta"):
+                continue
+            content = e.get("message", {}).get("content")
+            if isinstance(content, str):
+                steps.append({"kind": e["type"], "text": content})
+                continue
+            for b in content or []:
+                t = b.get("type")
+                if t == "text":
+                    steps.append({"kind": e["type"], "text": b.get("text", "")})
+                elif t == "thinking" and b.get("thinking"):
+                    steps.append({"kind": "thinking", "text": b["thinking"]})
+                elif t == "tool_use":
+                    steps.append({"kind": "tool_use", "name": b.get("name"),
+                                  "text": json.dumps(b.get("input"), ensure_ascii=False, indent=1)})
+                elif t == "tool_result":
+                    c = b.get("content")
+                    if isinstance(c, list):
+                        c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
+                    text = str(c or "")
+                    steps.append({"kind": "tool_result", "error": bool(b.get("is_error")),
+                                  "text": text[:3000] + ("……（已截断）" if len(text) > 3000 else "")})
+    return {"steps": steps, "file": str(files[0])}
+
+
+# 给 approval_mcp.py 用：挂起直到有人在网页或语音里做出决定
+@app.post("/api/approvals", dependencies=[Depends(auth)])
+async def request_approval(body: ApprovalRequest):
+    if body.session_id not in RUNS:
+        return {"allow": False, "message": "任务已结束"}
+    aid = uuid.uuid4().hex[:8]
+    future = asyncio.get_running_loop().create_future()
+    a = APPROVALS[aid] = {
+        "id": aid, "session_id": body.session_id, "tool": body.tool_name, "input": body.input,
+        "summary": approval_summary(body.tool_name, body.input), "created": time.time(), "future": future,
+    }
+    broadcast({"type": "approval", "approval": approval_public(a)})
+    push_session(body.session_id)
+    try:
+        allow, message = await asyncio.wait_for(future, APPROVAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        allow, message = False, "等待用户确认超时"
+        add_message(body.session_id, "event", f"⌛ 确认超时，已拒绝：{a['summary']}")
+    finally:
+        APPROVALS.pop(aid, None)
+        broadcast({"type": "approval_done", "id": aid, "session_id": body.session_id})
+        push_session(body.session_id)
+    return {"allow": allow, "message": message}
+
+
+@app.post("/api/approvals/{aid}", dependencies=[Depends(auth)])
+def decide_approval(aid: str, body: Decision):
+    resolve_approval(aid, body.allow, body.author.strip()[:20])
     return {"ok": True}
 
 
@@ -398,34 +587,66 @@ async def events(request: Request):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# 给小智 MCP 工具用：每个新话题开一个语音会话，追问时接着最近的语音会话
+# ---------- 给小智 MCP 工具用 ----------
+# 每个新话题开一个语音会话，追问时接着最近的语音会话
+
+
+def latest_voice_session() -> dict | None:
+    return db("SELECT * FROM sessions WHERE source='voice' ORDER BY updated DESC LIMIT 1", one=True)
+
+
+async def wait_voice(sid: str, timeout: float) -> dict:
+    """等到任务完成或出现待确认操作，最多等 timeout 秒。"""
+    end = time.time() + timeout
+    while True:
+        run = RUNS.get(sid)
+        pending = pending_for(sid)
+        if pending:
+            return {"status": "confirm",
+                    "reply": f"需要确认：{pending[0]['summary']}。请问用户是否同意，用户回答后调用 claude_confirm。"}
+        if not run:
+            msg = db("SELECT * FROM messages WHERE session_id=? AND role IN ('assistant','error') "
+                     "ORDER BY id DESC LIMIT 1", (sid,), one=True)
+            ok = bool(msg and msg["role"] == "assistant")
+            return {"status": "done" if ok else "failed", "reply": msg["content"] if msg else "没有结果。"}
+        if time.time() >= end:
+            tools = f"，已经做了 {len(run.tools)} 步操作" if run.tools else ""
+            return {"status": "running",
+                    "reply": f"任务还在进行{tools}，可能需要几分钟。稍后问我“任务进度”就能看到结果。"}
+        await asyncio.sleep(0.3)
+
+
 @app.post("/api/voice", dependencies=[Depends(auth)])
 async def voice_task(body: VoiceTask):
     task = body.task.strip()
-    last = db("SELECT * FROM sessions WHERE source='voice' ORDER BY updated DESC LIMIT 1", one=True)
+    last = latest_voice_session()
     if last and last["id"] in RUNS:
-        return {"status": "busy", "reply": "上一个语音任务还在进行，请等它完成后再下新任务。"}
-    sess = last if (body.continue_last and last) else create_session("🎤 " + task[:18], "voice")
-    run = await start_turn(sess["id"], task, body.allow_edit, VOICE_HINT)
-    try:
-        await asyncio.wait_for(asyncio.shield(run.done.wait()), body.wait)
-    except asyncio.TimeoutError:
-        return {"status": "running", "reply": "任务已开始，可能需要几分钟。稍后问我“任务进度”就能看到结果。"}
-    return {"status": "done" if run.ok else "failed", "reply": run.reply}
+        state = await wait_voice(last["id"], 0)
+        if state["status"] == "running":
+            return {"status": "busy", "reply": "上一个语音任务还在进行，请等它完成后再下新任务。"}
+        return state  # 有操作在等确认，先把它告诉用户
+    sess = last if (body.continue_last and last) else create_session("🎤 " + task[:18], "voice", "语音")
+    await start_turn(sess["id"], task, "语音")
+    return await wait_voice(sess["id"], body.wait)
+
+
+@app.post("/api/voice/confirm", dependencies=[Depends(auth)])
+async def voice_confirm(body: VoiceConfirm):
+    last = latest_voice_session()
+    pending = pending_for(last["id"]) if last else []
+    if not pending:
+        return {"status": "none", "reply": "现在没有等待确认的操作。"}
+    resolve_approval(pending[0]["id"], body.allow, "语音")
+    await asyncio.sleep(0.5)  # 给 Claude 一点时间继续，免得马上读到同一个状态
+    return await wait_voice(last["id"], body.wait)
 
 
 @app.get("/api/voice/status", dependencies=[Depends(auth)])
-def voice_status():
-    last = db("SELECT * FROM sessions WHERE source='voice' ORDER BY updated DESC LIMIT 1", one=True)
+async def voice_status():
+    last = latest_voice_session()
     if not last:
         return {"status": "none", "reply": "还没有执行过语音任务。"}
-    run = RUNS.get(last["id"])
-    if run:
-        tools = f"，已经做了 {len(run.tools)} 步操作" if run.tools else ""
-        return {"status": "running", "reply": f"任务还在进行{tools}。"}
-    msg = db("SELECT * FROM messages WHERE session_id=? AND role!='user' ORDER BY id DESC LIMIT 1",
-             (last["id"],), one=True)
-    return {"status": "done", "reply": msg["content"] if msg else "没有结果。"}
+    return await wait_voice(last["id"], 0)
 
 
 if __name__ == "__main__":
