@@ -176,7 +176,7 @@ fn check_project_dir(dir: &str) -> Result<(), String> {
         return Err("这个文件夹里没有 server.py".into());
     }
     if !dir.join("config.bat").is_file() {
-        return Err("没找到 config.bat，请先把 config.example.bat 复制为 config.bat 并填写".into());
+        return Err("没找到 config.bat，请先在这个文件夹里运行 install.bat".into());
     }
     Ok(())
 }

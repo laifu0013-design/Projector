@@ -2,12 +2,21 @@
 chcp 65001 >nul
 cd /d %~dp0
 if not exist config.bat (
-  echo 请先把 config.example.bat 复制为 config.bat 并填写配置
+  echo 请先运行 install.bat，或把 config.example.bat 复制为 config.bat 并填写配置
   pause
   exit /b 1
 )
 call config.bat
-start "Claude 中心服务" cmd /k python server.py
+set "PY=python"
+if exist .venv\Scripts\python.exe set "PY=.venv\Scripts\python.exe"
+if defined PYTHON set "PY=%PYTHON%"
+set PYTHONUTF8=1
+start "Claude 中心服务" cmd /k "%PY%" server.py
+if "%MCP_ENDPOINT%"=="" (
+  echo 没有填 MCP_ENDPOINT，只启动网页端，不连小智语音。
+  pause
+  exit /b 0
+)
 timeout /t 3 /nobreak >nul
-python mcp_pipe.py claude_mcp.py
+"%PY%" mcp_pipe.py claude_mcp.py
 pause

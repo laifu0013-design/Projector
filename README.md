@@ -37,15 +37,12 @@
 ## 在台式机上安装
 
 1. 安装 [Python 3.10+](https://www.python.org/downloads/)，安装时勾选 “Add python.exe to PATH”。
-2. 安装 Claude Code 并完成登录或配置（用 DeepSeek 的话，按 DeepSeek 文档设置 `ANTHROPIC_BASE_URL` 等环境变量）。在命令行里运行 `claude -p "你好"`，能正常回答就说明可以用了。
-3. 在本目录运行：
-   ```bat
-   pip install -r requirements.txt
-   ```
-4. 把 `config.example.bat` 复制为 `config.bat`，填入以下内容：
-   - `MCP_ENDPOINT`：在 xiaozhi.me 控制台的智能体配置里找到 “MCP 接入点”，复制完整地址
-   - `CENTER_TOKEN`：网页端的访问密码，自己设定
-5. 双击 `start.bat`。会打开两个窗口：中心服务，以及 MCP 连接。
+2. 安装 Claude Code 并完成登录或配置（用 DeepSeek 的话，按 DeepSeek 文档设置 `ANTHROPIC_BASE_URL` 等环境变量，也可以写进 `config.bat`）。在命令行里运行 `claude -p "你好"`，能正常回答就说明可以用了。
+3. 到仓库的 [Releases](https://github.com/luckytiger125/Projector/releases) 页下载最新的 `Projector-server-vX.Y.Z.zip`，解压到任意文件夹（路径最好不带中文）。
+4. 双击 `install.bat`：它会检查 Python 和 Claude Code、建好 `.venv` 装依赖，并引导你生成 `config.bat`：
+   - MCP 接入点：在 xiaozhi.me 控制台的智能体配置里找到 “MCP 接入点”，复制完整地址；不用语音可以留空
+   - 网页端访问密码：自己设定，留空会自动生成（启动时显示在服务窗口里）
+5. 双击 `start.bat`。会打开中心服务窗口；填了 MCP 接入点的话，还会连上小智。
 6. 第一次运行时 Windows 防火墙会弹窗，选择允许 **专用网络**，局域网里的其他电脑才能访问。
 
 ## 使用
@@ -61,12 +58,11 @@
 
 **下载安装**
 
-1. 打开 GitHub 仓库的 **Actions** 页 → 左边选“桌面软件（Windows 安装包）” → 点最新一次成功（绿色 ✓）的运行。
-2. 页面底部 **Artifacts** 里下载 `Projector-Windows-installer`，解压后有两个安装包，任选一个：
+1. 到仓库的 [Releases](https://github.com/luckytiger125/Projector/releases) 页，下载最新版本里的安装包，任选一个：
    - `Projector_x.x.x_x64-setup.exe`：推荐，装到当前用户下，不需要管理员权限
    - `Projector_x.x.x_x64_zh-CN.msi`：适合统一部署
-3. 安装包没有签名，Windows 可能提示“已保护你的电脑”，点“更多信息” → “仍要运行”。
-4. 第一次打开填服务器地址：台式机本机填 `http://localhost:8080`，同事填 `http://台式机IP:8080`。之后打开软件直接进入网页端，登录方式和网页一样。
+2. 安装包没有签名，Windows 可能提示“已保护你的电脑”，点“更多信息” → “仍要运行”。
+3. 第一次打开填服务器地址：台式机本机填 `http://localhost:8080`，同事填 `http://台式机IP:8080`。之后打开软件直接进入网页端，登录方式和网页一样。
 
 **使用**
 
@@ -78,18 +74,22 @@
 
 打开后不再需要 `start.bat`：软件开机自动启动（缩在托盘），在后台无窗口地运行 `python server.py` 和 `python mcp_pipe.py claude_mcp.py`，进程崩溃会自动重启；托盘菜单里能看到两个进程是否在运行。
 
-1. 先按上面“在台式机上安装”配好 Python、依赖和 `config.bat`，并确认双击 `start.bat` 能正常用（之后关掉 `start.bat` 的窗口，避免端口冲突）。
+1. 先按上面“在台式机上安装”运行 `install.bat`，并确认双击 `start.bat` 能正常用（之后关掉 `start.bat` 的窗口，避免端口冲突）。
 2. 在设置页勾选“服务端模式”，项目文件夹填本仓库所在的文件夹（`server.py` 和 `config.bat` 所在的位置）。也可以从托盘菜单勾选。
 3. 环境变量读取 `config.bat` 里的 `set` 行；改了 `config.bat` 后在托盘里关掉再打开服务端模式即可生效。想指定 Python，可以在 `config.bat` 里加 `set "PYTHON=C:\路径\python.exe"`；项目文件夹里有 `.venv` 时会自动使用。
 4. 进程输出写在日志文件夹的 `server.log` 和 `mcp_pipe.log` 里（托盘 → 打开日志文件夹）。
 
 **自己构建**
 
-推送到 `main` 且改动了 `desktop/` 时，GitHub Actions 会在 Windows 上自动构建安装包；也可以在 Actions 页手动点 “Run workflow”。在 Mac 上开发调试：
+推送到 `main` 且改动了 `desktop/` 时，GitHub Actions 会在 Windows 上自动构建安装包（在 Actions 页的 Artifacts 里）；也可以手动点 “Run workflow”。推送 `v` 开头的标签（比如 `git tag v0.1.1 && git push origin v0.1.1`）会自动发 Release。发版前记得同时改 `desktop/src-tauri/tauri.conf.json` 里的版本号。在 Mac 上开发调试：
 
 ```bash
 cd desktop && npm install && npm run tauri dev
 ```
+
+## 板子固件
+
+界面、唤醒词“小橙子”、按键和皮肤的改动见 [firmware/README.md](firmware/README.md)。
 
 ## 已知限制
 

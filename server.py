@@ -203,11 +203,18 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+def _hint_file(source: str, hint: str) -> Path:
+    path = DATA / f"hint_{source}.txt"
+    path.write_text(hint, encoding="utf-8")
+    return path
+
+
 def build_command(sess: dict, hint: str) -> list[str]:
     cmd = [
         CLAUDE_BIN, "-p",
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-        "--append-system-prompt", hint,
+        # 提示词写进文件再传：Windows 上 claude 常是 .cmd 包装，中文参数经过 cmd 容易乱码
+        "--append-system-prompt-file", str(_hint_file(sess["source"], hint)),
     ]
     if sess["bypass"]:
         cmd += ["--permission-mode", "bypassPermissions"]
@@ -246,6 +253,14 @@ def run_claude(run: "Run", prompt: str, cmd: list[str], emit) -> dict:
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     run.proc = proc
+    # stderr 要单独读走，否则输出多了会把管道塞满，claude 卡住不动
+    err_tail: list[str] = []
+    def drain():
+        for line in proc.stderr:
+            err_tail.append(line)
+            del err_tail[:-50]
+    drainer = threading.Thread(target=drain, daemon=True)
+    drainer.start()
     timer = threading.Timer(TASK_TIMEOUT, lambda: (setattr(run, "timed_out", True), _kill_tree(proc)))
     timer.start()
     # 指令走 stdin，避免 Windows 命令行对中文和引号的转义问题
@@ -277,10 +292,11 @@ def run_claude(run: "Run", prompt: str, cmd: list[str], emit) -> dict:
             elif kind == "result":
                 final.update(ev)
         proc.wait()
+        drainer.join(2)
     finally:
         timer.cancel()
     if not final.get("type"):
-        err = proc.stderr.read().strip()[-300:]
+        err = "".join(err_tail).strip()[-300:]
         final = {**final, "is_error": True, "result": err or f"claude 异常退出（退出码 {proc.returncode}）"}
     return final
 
