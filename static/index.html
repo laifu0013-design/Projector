@@ -10,37 +10,44 @@
 :root {
   --bg: #f7f7f5; --panel: #ffffff; --side: #efeee9; --text: #1f1f1d; --muted: #77756e;
   --border: #e2e0d8; --accent: #c96442; --accent-text: #fff; --user: #ebe8df; --error: #b3261e;
-  --chip: #f1efe8; --code: #f3f2ee; --warn-bg: #fdf3e1; --warn: #9a5b00; --ok: #2e7d32;
+  --chip: #f1efe8; --code: #f3f2ee; --warn-bg: #fdf3e1; --warn: #9a5b00; --ok: #2e7d32; --info-bg: #e8f0fb; --info: #2a5d9f;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #1d1d1b; --panel: #262624; --side: #222220; --text: #ecebe6; --muted: #9a988f;
     --border: #3a3936; --accent: #d97757; --user: #34332f; --error: #f2b8b5; --chip: #31302d; --code: #2f2e2b;
-    --warn-bg: #3a2f1c; --warn: #f0c27a; --ok: #8bc78e;
+    --warn-bg: #3a2f1c; --warn: #f0c27a; --ok: #8bc78e; --info-bg: #1f2c3d; --info: #9cc2f0;
   }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text); font: 15px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
 button { font: inherit; color: inherit; cursor: pointer; }
+input, select, textarea { font: inherit; color: var(--text); }
 .app { display: flex; height: 100%; }
+[hidden] { display: none !important; }
 
 aside { width: 260px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
 .side-head { padding: 14px; display: flex; gap: 8px; align-items: center; }
 .side-head h1 { font-size: 16px; margin: 0; flex: 1; }
-.side-foot { padding: 10px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
-.side-foot a { color: inherit; }
-.btn { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 6px 12px; white-space: nowrap; }
+.side-foot { padding: 10px 14px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.side-foot .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.side-foot a { color: inherit; cursor: pointer; }
+.side-foot strong { color: var(--text); }
+.btn { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 6px 12px; white-space: nowrap; text-decoration: none; display: inline-block; line-height: 1.4; }
 .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .btn.small { padding: 2px 10px; font-size: 13px; }
+.btn.danger { color: var(--error); }
 .btn:disabled { opacity: .5; cursor: default; }
+a.btn { color: inherit; }
+a.btn.primary { color: var(--accent-text); }
 #sessions { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
 .sess { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
 .sess:hover { background: var(--border); }
 .sess.active { background: var(--panel); box-shadow: 0 0 0 1px var(--border); }
 .sess .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite alternate; flex-shrink: 0; }
-.sess .warn { font-size: 12px; background: var(--warn-bg); color: var(--warn); border-radius: 4px; padding: 0 5px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite alternate; flex-shrink: 0; display: inline-block; }
+.warn { font-size: 12px; background: var(--warn-bg); color: var(--warn); border-radius: 4px; padding: 0 5px; }
 .sess .x { visibility: hidden; border: 0; background: none; color: var(--muted); padding: 0 4px; }
 .sess:hover .x { visibility: visible; }
 @keyframes pulse { from { opacity: .3; } to { opacity: 1; } }
@@ -50,8 +57,12 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .top .title { flex: 1; min-width: 120px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
 .toggle { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
 .toggle.on { color: var(--error); font-weight: 600; }
+.wd { font-size: 13px; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px dashed var(--border); border-radius: 6px; padding: 1px 8px; background: none; }
+.wd:disabled { cursor: default; border-style: solid; }
 #menuBtn { display: none; }
 #conn { font-size: 12px; color: var(--muted); }
+.banner { background: var(--info-bg); color: var(--info); font-size: 13px; padding: 6px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.banner.links { background: var(--chip); color: var(--text); }
 #messages { flex: 1; overflow-y: auto; padding: 20px 16px; }
 .inner { max-width: 820px; margin: 0 auto; }
 .msg { margin: 0 0 18px; }
@@ -65,8 +76,12 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .msg code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
 .msg table { border-collapse: collapse; } .msg td, .msg th { border: 1px solid var(--border); padding: 4px 8px; }
 .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
-.tools { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.tools, .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.msg.user .chips { justify-content: flex-end; margin: 0 0 4px; max-width: 80%; }
 .chip { font-size: 12px; background: var(--chip); border: 1px solid var(--border); border-radius: 6px; padding: 1px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.ref { cursor: pointer; }
+.chip.skill { border-color: var(--accent); color: var(--accent); }
+.chip button { border: 0; background: none; padding: 0 0 0 4px; color: var(--muted); }
 .empty { color: var(--muted); text-align: center; margin-top: 18vh; }
 .typing::after { content: "▍"; animation: pulse .6s infinite alternate; }
 
@@ -76,17 +91,35 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .approval .acts { display: flex; gap: 8px; justify-content: flex-end; }
 .del { color: var(--error); } .add { color: var(--ok); }
 
-.composer { border-top: 1px solid var(--border); padding: 12px 16px; }
-.composer .inner { display: flex; gap: 8px; align-items: flex-end; }
+.composer { border-top: 1px solid var(--border); padding: 10px 16px 12px; }
+.composer .inner { display: flex; flex-direction: column; gap: 6px; }
+#composerChips:empty { display: none; }
+#composerChips { margin: 0; }
+.composer .row { display: flex; gap: 8px; align-items: flex-end; }
+.composer .tools-row { display: flex; gap: 6px; flex-wrap: wrap; }
 textarea { flex: 1; resize: none; min-height: 52px; max-height: 240px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; }
 textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .composer .btns { display: flex; flex-direction: column; gap: 6px; }
+.dropzone { position: fixed; inset: 0; background: rgba(201,100,66,.15); border: 3px dashed var(--accent); z-index: 30; display: none; align-items: center; justify-content: center; font-size: 20px; color: var(--accent); pointer-events: none; }
+.dropzone.show { display: flex; }
+
+.pop { position: absolute; bottom: 100%; left: 0; margin-bottom: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.15); width: 340px; max-height: 360px; overflow-y: auto; z-index: 15; padding: 6px; }
+.pop .it { padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+.pop .it:hover { background: var(--chip); }
+.pop .it .d { font-size: 12px; color: var(--muted); }
+.anchor { position: relative; }
 
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
 .overlay.show { display: flex; }
 .dialog { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 860px; max-height: 90vh; display: flex; flex-direction: column; }
+.dialog.narrow { max-width: 440px; }
 .dialog header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 .dialog header strong { flex: 1; }
+.dialog .content { overflow-y: auto; padding: 14px 16px; }
+.dialog .foot { padding: 10px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+.form { display: flex; flex-direction: column; gap: 8px; }
+.form input, .form select { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); }
+.err { color: var(--error); font-size: 13px; min-height: 1.2em; }
 #steps { overflow-y: auto; padding: 12px 16px; font-size: 13px; }
 .step { margin-bottom: 10px; }
 .step .k { font-size: 12px; color: var(--muted); }
@@ -95,16 +128,20 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .step.err pre { color: var(--error); }
 
 #login { background: var(--bg); }
-#login form { background: var(--panel); border: 1px solid var(--border); padding: 24px; border-radius: 12px; width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 10px; }
-#login input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
+#login form { background: var(--panel); border: 1px solid var(--border); padding: 24px; border-radius: 12px; width: 100%; max-width: 340px; }
 
 /* 文件 */
 #filesBox .dialog { max-width: 1280px; height: 90vh; }
 .fhead { flex-wrap: wrap; }
+.areas { display: flex; gap: 4px; }
+.areas button { border: 1px solid var(--border); background: var(--bg); border-radius: 6px; padding: 1px 10px; font-size: 13px; }
+.areas button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .crumbs { flex: 1; min-width: 160px; font-size: 14px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .crumbs a { color: var(--accent); text-decoration: none; cursor: pointer; }
 .crumbs a:hover { text-decoration: underline; }
-#fq { width: 200px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 14px; }
+#fq { width: 200px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); font-size: 14px; }
+.pickbar { background: var(--info-bg); color: var(--info); padding: 6px 16px; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.pickbar span { flex: 1; }
 .fbody { flex: 1; display: flex; min-height: 0; }
 #flist { width: 340px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border); padding: 6px; }
 .fi { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 14px; }
@@ -114,10 +151,11 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .fi .s { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .fi .sub { display: block; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 #fview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.fvhead { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; }
-.fvhead .n { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fvhead { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.fvhead .n { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 100px; }
 #fcontent { flex: 1; overflow: auto; position: relative; }
 #fcontent .center { color: var(--muted); text-align: center; margin-top: 20%; padding: 0 20px; }
+#fcontent .center .btn { margin: 14px 4px 0; }
 #fcontent img { max-width: 100%; display: block; margin: 12px auto; }
 #fcontent iframe { border: 0; width: 100%; height: 100%; display: block; background: #fff; }
 #fcontent video, #fcontent audio { display: block; max-width: 100%; margin: 16px auto; }
@@ -125,25 +163,48 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 #fcontent .mdv { padding: 16px 24px; max-width: 860px; }
 #fcontent .sheet table { border-collapse: collapse; font-size: 13px; margin: 8px; }
 #fcontent .sheet td, #fcontent .sheet th { border: 1px solid var(--border); padding: 2px 6px; white-space: nowrap; }
-.tabs { display: flex; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; position: sticky; top: 0; background: var(--panel); }
+.tabs { display: flex; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; position: sticky; top: 0; background: var(--panel); z-index: 1; }
 .tabs button { border: 1px solid var(--border); background: var(--bg); border-radius: 6px; padding: 1px 10px; font-size: 13px; }
 .tabs button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 #fcontent .docx-wrapper { background: var(--chip); padding: 16px; }
-a.btn { text-decoration: none; color: inherit; }
-#fcontent .center .btn { margin: 14px 4px 0; }
 a.fpath { color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
 #fback { display: none; }
 
+/* 管理 */
+#adminBox .dialog { max-width: 1100px; height: 90vh; }
+#adminBox .content { flex: 1; }
+table.grid { border-collapse: collapse; width: 100%; font-size: 14px; }
+table.grid th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; }
+table.grid td, table.grid th { border-bottom: 1px solid var(--border); padding: 6px 8px; vertical-align: middle; }
+details.grp { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
+details.grp summary { padding: 8px 12px; cursor: pointer; font-weight: 600; }
+details.grp .sess { margin: 0 6px 4px; }
+.card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.card h4 { margin: 0 0 2px; font-size: 15px; }
+.users-pick { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; margin-top: 6px; }
+.filev { display: flex; gap: 10px; min-height: 300px; }
+.filev .list { width: 220px; flex-shrink: 0; border-right: 1px solid var(--border); font-size: 13px; }
+.filev .list div { padding: 3px 6px; cursor: pointer; border-radius: 4px; word-break: break-all; }
+.filev .list div.on { background: var(--user); }
+.filev pre { flex: 1; margin: 0; background: var(--code); border-radius: 6px; padding: 8px; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 55vh; overflow: auto; }
+.status { font-size: 12px; border-radius: 4px; padding: 0 6px; }
+.status.pending { background: var(--warn-bg); color: var(--warn); }
+.status.approved { background: var(--chip); color: var(--ok); }
+.status.rejected { background: var(--chip); color: var(--error); }
+
 @media (max-width: 720px) {
+  aside { position: fixed; z-index: 5; top: 0; bottom: 0; left: 0; transform: translateX(-100%); transition: transform .2s; }
+  aside.open { transform: none; box-shadow: 0 0 30px rgba(0,0,0,.3); }
+  #menuBtn { display: inline-block; }
   #flist { width: 100%; border-right: 0; }
   #fview { display: none; }
   .fbody.viewing #flist { display: none; }
   .fbody.viewing #fview { display: flex; }
   #fback { display: inline-block; }
   #fq { width: 100%; order: 9; }
-  aside { position: fixed; z-index: 5; top: 0; bottom: 0; left: 0; transform: translateX(-100%); transition: transform .2s; }
-  aside.open { transform: none; box-shadow: 0 0 30px rgba(0,0,0,.3); }
-  #menuBtn { display: inline-block; }
+  .pop { width: calc(100vw - 32px); }
+  .filev { flex-direction: column; }
+  .filev .list { width: 100%; border-right: 0; }
 }
 </style>
 </head>
@@ -152,12 +213,21 @@ a.fpath { color: var(--accent); cursor: pointer; text-decoration: underline dott
   <aside id="side">
     <div class="side-head"><h1>Claude 工作台</h1><button class="btn primary" id="newBtn">新会话</button></div>
     <div id="sessions"></div>
-    <div class="side-foot">当前用户：<span id="me"></span> · <a href="#" id="switchUser">切换</a></div>
+    <div class="side-foot">
+      <div class="row"><strong id="me"></strong><span id="roleTag"></span></div>
+      <div class="row">
+        <a id="skillsLink">🧩 技能</a>
+        <a id="adminLink" hidden>⚙ 管理</a>
+        <a id="pwdLink">改密码</a>
+        <a id="logoutLink">退出</a>
+      </div>
+    </div>
   </aside>
   <main>
     <div class="top">
       <button class="btn" id="menuBtn">☰</button>
       <div class="title" id="title" title="双击重命名">新会话</div>
+      <button class="wd" id="wdBtn" title="工作文件夹：Claude 在这个文件夹里干活。只能在会话开始前选"></button>
       <label class="toggle" id="bypassWrap" title="打开后本会话的所有操作（包括删除、运行命令）都不再询问">
         <input type="checkbox" id="bypass"> 完全放行
       </label>
@@ -165,35 +235,51 @@ a.fpath { color: var(--accent); cursor: pointer; text-decoration: underline dott
       <button class="btn small" id="stepsBtn">完整过程</button>
       <span id="conn"></span>
     </div>
+    <div class="banner" id="otherBanner" hidden></div>
+    <div class="banner links" id="linksBar" hidden></div>
     <div id="messages"><div class="inner" id="list"></div></div>
-    <div class="composer"><div class="inner">
-      <textarea id="input" placeholder="让 Claude 干点活……（Enter 发送，Shift+Enter 换行）"></textarea>
-      <div class="btns">
-        <button class="btn" id="stopBtn" hidden>停止</button>
-        <button class="btn primary" id="sendBtn">发送</button>
+    <div class="composer" id="composer"><div class="inner">
+      <div class="chips" id="composerChips"></div>
+      <div class="tools-row">
+        <button class="btn small" id="refBtn" title="从台式机文件库里选文件或文件夹（也可以在输入框里打 @）">📎 引用文件</button>
+        <span class="anchor"><button class="btn small" id="skillBtn">🧩 技能</button><div class="pop" id="skillPop" hidden></div></span>
+        <button class="btn small" id="localBtn" title="把这台电脑上的文件交给 Claude 处理，处理完可以同步回来">💻 本机文件</button>
+        <input type="file" id="uploadInput" multiple hidden>
+        <input type="file" id="uploadDirInput" webkitdirectory hidden>
+      </div>
+      <div class="row">
+        <textarea id="input" placeholder="让 Claude 干点活……（Enter 发送，Shift+Enter 换行，@ 引用文件，可以把文件拖进来）"></textarea>
+        <div class="btns">
+          <button class="btn" id="stopBtn" hidden>停止</button>
+          <button class="btn primary" id="sendBtn">发送</button>
+        </div>
       </div>
     </div></div>
   </main>
 </div>
+<div class="dropzone" id="dropzone">松开鼠标，把文件交给 Claude</div>
 
 <div class="overlay" id="stepsBox"><div class="dialog">
-  <header><strong>完整过程</strong><span class="meta" id="stepsNote"></span><button class="btn small" id="stepsClose">关闭</button></header>
+  <header><strong>完整过程</strong><span class="meta" id="stepsNote"></span><button class="btn small" data-close>关闭</button></header>
   <div id="steps"></div>
 </div></div>
 
 <div class="overlay" id="filesBox"><div class="dialog">
   <header class="fhead">
+    <span class="areas" id="areas"><button data-area="">文件库</button><button data-area="ws:">我的工作区</button></span>
     <span class="crumbs" id="crumbs"></span>
     <input id="fq" placeholder="搜索文件名（当前文件夹及子文件夹）">
-    <button class="btn small" id="filesClose">关闭</button>
+    <button class="btn small" id="frefDir" title="把当前文件夹引用到对话里">引用此文件夹</button>
+    <button class="btn small" data-close>关闭</button>
   </header>
+  <div class="pickbar" id="pickbar" hidden><span id="pickText"></span><button class="btn small primary" id="pickOk">选这个文件夹</button></div>
   <div class="fbody" id="fbody">
     <div id="flist"></div>
     <div id="fview">
       <div class="fvhead">
         <button class="btn small" id="fback">←</button>
         <span class="n" id="fname"></span>
-        <button class="btn small" id="fask" hidden title="把这个文件的路径填到输入框里">交给 Claude</button>
+        <button class="btn small" id="fref" hidden title="引用到对话里，发送时告诉 Claude">引用到对话</button>
         <button class="btn small" id="flocal" hidden title="下载一份副本，用这台电脑上的软件打开">用本机程序打开</button>
         <a class="btn small" id="fdown" hidden>下载</a>
       </div>
@@ -202,495 +288,36 @@ a.fpath { color: var(--accent); cursor: pointer; text-decoration: underline dott
   </div>
 </div></div>
 
-<div class="overlay" id="login"><form id="loginForm">
-  <strong>进入 Claude 工作台</strong>
-  <label class="meta">你的名字（会记录在消息和确认操作上）</label>
-  <input id="name" autocomplete="nickname" required>
-  <label class="meta">访问密码（在台式机中心服务窗口里能看到）</label>
-  <input id="pwd" type="password" autocomplete="current-password" required>
-  <button class="btn primary">进入</button>
+<div class="overlay" id="adminBox"><div class="dialog">
+  <header><strong>管理</strong>
+    <span class="tabs" id="adminTabs" style="position:static;border:0;padding:0">
+      <button data-tab="users" class="on">用户</button><button data-tab="chats">聊天记录</button>
+      <button data-tab="library">技能库</button><button data-tab="review">待审核 <span id="pendingCount"></span></button>
+    </span>
+    <span style="flex:1"></span><button class="btn small" data-close>关闭</button>
+  </header>
+  <div class="content" id="adminContent"></div>
+</div></div>
+
+<div class="overlay" id="dlgBox"><div class="dialog narrow" id="dlg">
+  <header><strong id="dlgTitle"></strong><button class="btn small" data-close>关闭</button></header>
+  <div class="content" id="dlgBody"></div>
+  <div class="foot" id="dlgFoot"></div>
+</div></div>
+
+<div class="overlay" id="login"><form id="loginForm" class="form">
+  <strong id="loginTitle">登录 Claude 工作台</strong>
+  <div id="setupHint" class="meta" hidden>第一次使用：创建管理员账号。之后在“⚙ 管理”里给同事建账号。</div>
+  <input id="lgUser" placeholder="用户名" autocomplete="username" required>
+  <input id="lgName" placeholder="显示的名字（可选）" hidden>
+  <input id="lgPwd" type="password" placeholder="密码" autocomplete="current-password" required>
+  <input id="lgPwd2" type="password" placeholder="再输一次密码" hidden>
+  <div class="err" id="lgErr"></div>
+  <button class="btn primary" id="lgBtn">登录</button>
+  <div class="meta" id="lgNote">没有账号请找管理员开通</div>
 </form></div>
 
-<script>
-const $ = id => document.getElementById(id);
-const store = {
-  get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
-};
-let token = store.get("token");
-let me = store.get("name");
-let sessions = [];
-let current = null;          // 当前会话 id，null 表示还没发消息的新会话
-let messages = [];
-let live = null;             // 正在进行的回复 {text, tools}
-let approvals = [];          // 当前会话待确认的操作
-let es = null;
-
-function api(path, opts = {}) {
-  return fetch(path, {
-    ...opts,
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token, ...(opts.headers || {}) },
-  }).then(async r => {
-    if (r.status === 401) { showLogin(); throw new Error("需要密码"); }
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.detail || r.status);
-    return data;
-  });
-}
-
-function md(text) {
-  if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(text || ""));
-  return `<div style="white-space:pre-wrap">${esc(text)}</div>`;
-}
-function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
-
-function toolChips(tools) {
-  if (!tools || !tools.length) return "";
-  return '<div class="tools">' + tools.map(t =>
-    `<span class="chip" title="${esc(t.detail)}">${esc(t.name)}${t.detail ? " · " + esc(t.detail) : ""}</span>`).join("") + "</div>";
-}
-
-function approvalDetail(a) {
-  const i = a.input || {};
-  if (a.tool === "Bash") return esc(i.command) + (i.description ? `\n\n# ${esc(i.description)}` : "");
-  if (a.tool === "Edit") return `<span class="del">- ${esc(i.old_string)}</span>\n<span class="add">+ ${esc(i.new_string)}</span>`;
-  if (a.tool === "Write") { const c = i.content || ""; return esc(c.slice(0, 2000)) + (c.length > 2000 ? "\n……" : ""); }
-  return esc(JSON.stringify(i, null, 1));
-}
-
-function renderSessions() {
-  $("sessions").innerHTML = sessions.map(s => `
-    <div class="sess ${s.id === current ? "active" : ""}" data-id="${s.id}">
-      ${s.running ? '<span class="dot"></span>' : ""}
-      <span class="t" title="${esc(s.created_by ? "由 " + s.created_by + " 创建" : "")}">${esc(s.title)}</span>
-      ${s.pending ? '<span class="warn">待确认</span>' : ""}
-      <button class="x" data-del="${s.id}" title="删除">✕</button>
-    </div>`).join("");
-}
-
-function renderTop() {
-  const s = sessions.find(s => s.id === current);
-  $("title").textContent = s ? s.title : "新会话";
-  const running = !!(s && s.running);
-  $("stopBtn").hidden = !running;
-  $("sendBtn").disabled = running;
-  $("bypass").checked = !!(s && s.bypass);
-  $("bypass").disabled = !s || s.source === "voice";
-  $("bypassWrap").classList.toggle("on", !!(s && s.bypass));
-  $("stepsBtn").disabled = !s;
-}
-
-function renderMessages() {
-  renderTop();
-  if (!messages.length && !live && !approvals.length) {
-    $("list").innerHTML = '<div class="empty">工作目录是 D 盘。可以让 Claude 查找、总结、整理文件。<br>删除、移动文件和运行命令前会在这里请你确认。<br>板子上的语音任务也会出现在左侧（🎤）。</div>';
-    return;
-  }
-  let html = messages.map(m => {
-    if (m.role === "user") {
-      const who = (m.meta && m.meta.author) || "";
-      const tag = m.meta && m.meta.bypass ? " · 完全放行" : "";
-      return `<div class="msg user"><div class="body">${esc(m.content)}</div>${who || tag ? `<div class="meta">${esc(who)}${tag}</div>` : ""}</div>`;
-    }
-    if (m.role === "event") return `<div class="msg event">${esc(m.content)}</div>`;
-    const meta = m.meta || {};
-    const info = [meta.seconds != null ? meta.seconds + " 秒" : "", meta.cost ? "$" + meta.cost.toFixed(4) : ""].filter(Boolean).join(" · ");
-    const body = m.role === "error" ? esc(m.content) : md(m.content);
-    return `<div class="msg ${m.role}">${toolChips(meta.tools)}<div class="body">${body}</div>${info ? `<div class="meta">${info}</div>` : ""}</div>`;
-  }).join("");
-  if (live) {
-    html += `<div class="msg assistant">${toolChips(live.tools)}<div class="body ${approvals.length ? "" : "typing"}">${md(live.text)}</div></div>`;
-  }
-  html += approvals.map(a => `
-    <div class="approval">
-      <strong>⚠ 需要确认：</strong>${esc(a.summary)}
-      <pre>${approvalDetail(a)}</pre>
-      <div class="acts">
-        <button class="btn" data-deny="${a.id}">拒绝</button>
-        <button class="btn primary" data-allow="${a.id}">同意</button>
-      </div>
-    </div>`).join("");
-  const box = $("messages");
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-  $("list").innerHTML = html;
-  linkifyPaths($("list"));
-  if (atBottom || approvals.length) box.scrollTop = box.scrollHeight;
-}
-
-async function loadSessions() {
-  sessions = await api("/api/sessions");
-  renderSessions();
-}
-
-async function openSession(id) {
-  current = id;
-  $("side").classList.remove("open");
-  if (!id) { messages = []; live = null; approvals = []; renderSessions(); renderMessages(); $("input").focus(); return; }
-  const data = await api("/api/sessions/" + id);
-  if (current !== id) return;
-  messages = data.messages; live = data.live; approvals = data.approvals;
-  renderSessions(); renderMessages();
-  $("messages").scrollTop = $("messages").scrollHeight;
-}
-
-function upsertSession(s) {
-  const i = sessions.findIndex(x => x.id === s.id);
-  if (i >= 0) sessions.splice(i, 1);
-  sessions.unshift(s);
-  sessions.sort((a, b) => b.updated - a.updated);
-  renderSessions();
-  if (s.id === current) { if (!s.running) live = null; renderMessages(); }
-}
-
-function notify(text) {
-  if (document.hasFocus()) return;
-  if (window.__TAURI__) {  // 桌面软件里走 Tauri 通知插件
-    window.__TAURI__.core.invoke("plugin:notification|notify", { options: { title: "Claude 工作台", body: text } }).catch(() => {});
-    return;
-  }
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
-  try { new Notification("Claude 工作台", { body: text }); } catch {}
-}
-
-function connect() {
-  if (es) es.close();
-  es = new EventSource("/api/events?token=" + encodeURIComponent(token));
-  es.onopen = () => {
-    $("conn").textContent = ""; loadSessions(); if (current) openSession(current);
-    if (!F.root) api("/api/files").then(d => { Object.assign(F, { root: d.root, office: d.office, path: d.path, entries: d.entries }); renderMessages(); }).catch(() => {});
-  };
-  es.onerror = () => { $("conn").textContent = "连接中断，正在重连…"; };
-  es.onmessage = e => {
-    const ev = JSON.parse(e.data);
-    if (ev.type === "session") return upsertSession(ev.session);
-    if (ev.type === "session_deleted") {
-      sessions = sessions.filter(s => s.id !== ev.session_id); renderSessions();
-      if (current === ev.session_id) openSession(null);
-      return;
-    }
-    if (ev.type === "approval") notify("需要确认：" + ev.approval.summary);
-    if (ev.session_id !== current && !(ev.approval && ev.approval.session_id === current)) return;
-    if (ev.type === "message") {
-      if (!messages.some(m => m.id === ev.message.id)) messages.push(ev.message);
-      if (ev.message.role === "user") live = { text: "", tools: [] };
-      else if (ev.message.role !== "event") live = null;
-    } else if (ev.type === "approval") { approvals.push(ev.approval); }
-    else if (ev.type === "approval_done") { approvals = approvals.filter(a => a.id !== ev.id); }
-    else if (ev.type === "delta_reset") { live = { text: "", tools: live ? live.tools : [] }; }
-    else if (ev.type === "delta") { live = live || { text: "", tools: [] }; live.text += ev.text; }
-    else if (ev.type === "tool") { live = live || { text: "", tools: [] }; live.tools.push({ name: ev.name, detail: ev.detail }); }
-    renderMessages();
-  };
-}
-
-async function send() {
-  const text = $("input").value.trim();
-  if (!text || $("sendBtn").disabled) return;
-  $("sendBtn").disabled = true;
-  if (!window.__TAURI__ && "Notification" in window && Notification.permission === "default") Notification.requestPermission();
-  try {
-    if (!current) {
-      const s = await api("/api/sessions", { method: "POST", body: JSON.stringify({ title: text.slice(0, 20), author: me }) });
-      current = s.id; messages = []; approvals = []; upsertSession(s);
-    }
-    await api(`/api/sessions/${current}/messages`, { method: "POST", body: JSON.stringify({ text, author: me }) });
-    $("input").value = ""; autosize();
-  } catch (e) { alert(e.message); renderTop(); }
-}
-
-async function showSteps() {
-  if (!current) return;
-  $("steps").innerHTML = '<div class="meta">读取中…</div>';
-  $("stepsNote").textContent = "";
-  $("stepsBox").classList.add("show");
-  try {
-    const data = await api(`/api/sessions/${current}/transcript`);
-    $("stepsNote").textContent = data.note || "";
-    const label = { user: "用户", assistant: "Claude", thinking: "思考", tool_use: "调用工具", tool_result: "工具返回" };
-    $("steps").innerHTML = data.steps.map(s => `
-      <div class="step ${s.kind} ${s.error ? "err" : ""}">
-        <div class="k">${label[s.kind] || s.kind}${s.name ? " · " + esc(s.name) : ""}</div>
-        <pre>${esc(s.text)}</pre>
-      </div>`).join("") || '<div class="meta">没有记录</div>';
-    $("steps").scrollTop = $("steps").scrollHeight;
-  } catch (e) { $("steps").innerHTML = `<div class="meta">${esc(e.message)}</div>`; }
-}
-
-function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; }
-
-function showLogin() { $("name").value = me; $("login").classList.add("show"); (me ? $("pwd") : $("name")).focus(); }
-
-$("loginForm").onsubmit = async e => {
-  e.preventDefault();
-  token = $("pwd").value.trim();
-  me = $("name").value.trim();
-  try { await api("/api/sessions"); } catch { $("pwd").select(); return; }
-  store.set("token", token); store.set("name", me);
-  $("me").textContent = me;
-  $("login").classList.remove("show");
-  connect();
-};
-$("switchUser").onclick = e => { e.preventDefault(); showLogin(); };
-$("newBtn").onclick = () => openSession(null);
-$("menuBtn").onclick = () => $("side").classList.toggle("open");
-$("sendBtn").onclick = send;
-$("stopBtn").onclick = () => current && api(`/api/sessions/${current}/stop`, { method: "POST" });
-$("stepsBtn").onclick = showSteps;
-$("stepsClose").onclick = () => $("stepsBox").classList.remove("show");
-$("bypass").onchange = async () => {
-  const on = $("bypass").checked;
-  if (on && !confirm("打开后，本会话里 Claude 的所有操作（包括删除文件、运行命令）都不再询问，直接执行。确定吗？")) {
-    $("bypass").checked = false; return;
-  }
-  try { await api("/api/sessions/" + current, { method: "PATCH", body: JSON.stringify({ bypass: on }) }); }
-  catch (e) { alert(e.message); renderTop(); }
-};
-$("input").addEventListener("input", autosize);
-$("input").addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
-});
-$("list").onclick = e => {
-  const id = e.target.dataset.allow || e.target.dataset.deny;
-  if (!id) return;
-  e.target.closest(".approval").querySelectorAll("button").forEach(b => b.disabled = true);
-  api("/api/approvals/" + id, { method: "POST", body: JSON.stringify({ allow: !!e.target.dataset.allow, author: me }) })
-    .catch(err => alert(err.message));
-};
-$("sessions").onclick = async e => {
-  const del = e.target.dataset.del;
-  if (del) {
-    e.stopPropagation();
-    if (confirm("删除这个会话和它的聊天记录？")) api("/api/sessions/" + del, { method: "DELETE" }).catch(err => alert(err.message));
-    return;
-  }
-  const row = e.target.closest(".sess");
-  if (row) openSession(row.dataset.id);
-};
-$("title").ondblclick = async () => {
-  if (!current) return;
-  const t = prompt("会话名称", $("title").textContent);
-  if (t) api("/api/sessions/" + current, { method: "PATCH", body: JSON.stringify({ title: t }) });
-};
-
-
-// ---------- 文件浏览和预览 ----------
-const F = { root: "", office: false, path: "", entries: [], sel: null, searching: false };
-const EXT = {
-  image: "png jpg jpeg gif webp bmp svg ico avif tif tiff heic",
-  pdf: "pdf",
-  video: "mp4 webm mov m4v ogv",
-  audio: "mp3 wav ogg m4a flac aac opus",
-  md: "md markdown",
-  text: "txt log json xml yaml yml ini cfg conf toml py js ts jsx tsx css html htm vue bat cmd ps1 sh c cpp h hpp cs java kt go rs rb php sql lua r m srt properties env gitignore",
-  docx: "docx",
-  sheet: "xlsx xlsm xls csv ods",
-  office: "doc ppt pptx rtf odt odp wps et dps pps ppsx",
-};
-const kindOf = name => {
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  for (const k in EXT) if (EXT[k].split(" ").includes(ext)) return k;
-  return "other";
-};
-const ICON = { dir: "📁", image: "🖼", pdf: "📕", video: "🎬", audio: "🎵", md: "📝", text: "📄", docx: "📘", sheet: "📊", office: "📙", other: "📦" };
-const IS_DESKTOP = !!(window.__TAURI__ && window.__TAURI__.core);
-const fileUrl = (p, extra = "") => `/api/files/${extra || "raw"}?path=${encodeURIComponent(p)}&token=${encodeURIComponent(token)}`;
-const winPath = p => F.root.replace(/[\\/]$/, "") + (F.root.includes("\\") ? "\\" + p.replaceAll("/", "\\") : "/" + p);
-function fsize(n) {
-  if (n < 1024) return n + " B";
-  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
-  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
-  return (n / 1073741824).toFixed(1) + " GB";
-}
-const fdate = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
-
-const libs = {};
-function loadScript(src) {
-  return libs[src] || (libs[src] = new Promise((ok, fail) => {
-    const s = document.createElement("script"); s.src = src; s.onload = ok;
-    s.onerror = () => { delete libs[src]; fail(new Error("预览组件加载失败，检查这台电脑能不能上网")); };
-    document.head.appendChild(s);
-  }));
-}
-
-function renderCrumbs() {
-  const parts = F.path ? F.path.split("/") : [];
-  let html = `<a data-go="">${esc(F.root)}</a>`;
-  parts.forEach((p, i) => { html += ` › <a data-go="${esc(parts.slice(0, i + 1).join("/"))}">${esc(p)}</a>`; });
-  if (F.searching) html += " › 搜索结果";
-  $("crumbs").innerHTML = html;
-}
-
-function renderList() {
-  const list = F.entries;
-  $("flist").innerHTML = list.length ? list.map((e, i) => `
-    <div class="fi ${e.path === F.sel ? "sel" : ""}" data-i="${i}" title="${esc(e.name)}">
-      <span>${e.dir ? ICON.dir : ICON[kindOf(e.name)]}</span>
-      <span class="n">${esc(e.name)}${F.searching ? `<span class="sub">${esc(e.path)}</span>` : ""}</span>
-      <span class="s">${e.dir ? "" : fsize(e.size) + " · "}${fdate(e.mtime)}</span>
-    </div>`).join("") : '<div class="meta" style="padding:12px">这里是空的</div>';
-  const sel = $("flist").querySelector(".sel");
-  if (sel) sel.scrollIntoView({ block: "nearest" });
-}
-
-async function openDir(path) {
-  $("fq").value = ""; F.searching = false;
-  $("flist").innerHTML = '<div class="meta" style="padding:12px">读取中…</div>';
-  try {
-    const d = await api("/api/files?path=" + encodeURIComponent(path));
-    Object.assign(F, { root: d.root, office: d.office, path: d.path, entries: d.entries });
-    renderCrumbs();
-    if (d.select) { const e = d.entries.find(x => x.path === d.select); if (e) return preview(e); }
-    renderList();
-  } catch (e) { $("flist").innerHTML = `<div class="meta" style="padding:12px">${esc(e.message)}</div>`; }
-}
-
-let searchTimer;
-$("fq").addEventListener("input", () => {
-  clearTimeout(searchTimer);
-  const q = $("fq").value.trim();
-  if (!q) return openDir(F.path);
-  searchTimer = setTimeout(async () => {
-    $("flist").innerHTML = '<div class="meta" style="padding:12px">搜索中…</div>';
-    try {
-      const d = await api(`/api/files/search?path=${encodeURIComponent(F.path)}&q=${encodeURIComponent(q)}`);
-      if ($("fq").value.trim() !== q) return;
-      F.searching = true; F.entries = d.results; renderCrumbs(); renderList();
-      if (d.partial) $("flist").insertAdjacentHTML("beforeend", '<div class="meta" style="padding:8px">结果太多，只显示一部分，换个更具体的词试试</div>');
-    } catch (e) { $("flist").innerHTML = `<div class="meta" style="padding:12px">${esc(e.message)}</div>`; }
-  }, 400);
-});
-
-async function preview(e) {
-  if (e.dir) return openDir(e.path);
-  F.sel = e.path; renderList();
-  $("fbody").classList.add("viewing");
-  $("fname").textContent = e.name; $("fname").title = winPath(e.path);
-  $("fdown").hidden = false; $("fdown").href = fileUrl(e.path) + "&download=1"; $("fdown").setAttribute("download", e.name);
-  $("fask").hidden = false;
-  $("flocal").hidden = !IS_DESKTOP;
-  const box = $("fcontent");
-  const kind = kindOf(e.name);
-  const url = fileUrl(e.path);
-  const msg = t => box.innerHTML = `<div class="center">${t}</div>`;
-  // 预览不了时的提示：桌面软件里给“用本机程序打开”，浏览器里给“下载”
-  const cannot = why => msg(`${esc(e.name)}<br>${fsize(e.size)} · ${fdate(e.mtime)}<br><br>${why}<br>`
-    + (IS_DESKTOP ? `可以用这台电脑上的软件打开。<br><button class="btn primary" data-local>用本机程序打开</button>`
-                  : `可以下载后用本机软件打开。<br><a class="btn primary" href="${url}&download=1" download="${esc(e.name)}">下载</a>`));
-  msg("加载中…");
-  try {
-    if (kind === "image") box.innerHTML = `<img src="${url}" alt="">`;
-    else if (kind === "pdf") box.innerHTML = `<iframe src="${url}"></iframe>`;
-    else if (kind === "video") box.innerHTML = `<video src="${url}" controls></video>`;
-    else if (kind === "audio") box.innerHTML = `<audio src="${url}" controls></audio>`;
-    else if (kind === "md" || kind === "text") {
-      const d = await api("/api/files/text?path=" + encodeURIComponent(e.path));
-      if (F.sel !== e.path) return;
-      const note = d.truncated ? '<div class="meta" style="padding:8px 16px">文件太大，只显示前 1 MB</div>' : "";
-      box.innerHTML = note + (kind === "md" ? `<div class="mdv msg">${md(d.text)}</div>` : `<pre>${esc(d.text)}</pre>`);
-    } else if (kind === "docx") {
-      if (e.size > 50 * 1048576) return cannot("文件太大，不适合在这里预览。");
-      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
-      await loadScript("https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js");
-      const blob = await fetch(url).then(r => r.ok ? r.blob() : Promise.reject(new Error("读取失败")));
-      if (F.sel !== e.path) return;
-      box.innerHTML = "";
-      await docx.renderAsync(blob, box, null, { inWrapper: true, ignoreLastRenderedPageBreak: true });
-    } else if (kind === "sheet") {
-      if (e.size > 30 * 1048576) return cannot("表格太大，不适合在这里预览。");
-      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
-      const buf = await fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error("读取失败")));
-      if (F.sel !== e.path) return;
-      const wb = XLSX.read(buf, { type: "array", codepage: 936 });
-      const show = name => {
-        const ws = wb.Sheets[name];
-        const html = XLSX.utils.sheet_to_html(ws, { header: "", footer: "" });
-        box.innerHTML = `<div class="tabs">${wb.SheetNames.map(n => `<button class="${n === name ? "on" : ""}" data-sheet="${esc(n)}">${esc(n)}</button>`).join("")}</div>`
-          + `<div class="sheet">${window.DOMPurify ? DOMPurify.sanitize(html) : html}</div>`;
-        box.querySelectorAll("[data-sheet]").forEach(b => b.onclick = () => show(b.dataset.sheet));
-      };
-      show(wb.SheetNames[0]);
-    } else if (kind === "office") {
-      if (!F.office) return cannot("这种格式需要台式机装了 LibreOffice 才能预览。");
-      msg("正在转换成 PDF 预览，大文件第一次要等一会儿…");
-      box.innerHTML = `<iframe src="${fileUrl(e.path, "pdf")}"></iframe>`;
-    } else {
-      cannot("这种格式不能在这里预览。");
-    }
-  } catch (err) { if (F.sel === e.path) cannot("预览失败：" + esc(err.message)); }
-  // 图片、视频、音频格式浏览器不支持时（比如 HEIC、TIFF、部分视频编码）
-  const media = box.querySelector("img, video, audio");
-  if (media) media.onerror = () => { if (F.sel === e.path) cannot("这个文件的格式或编码这里放不了。"); };
-}
-
-function showFiles(path = null) {
-  $("filesBox").classList.add("show");
-  $("side").classList.remove("open");
-  if (path !== null) openDir(path);
-  else if (!F.opened) openDir(F.path);
-  F.opened = true;
-}
-
-// 把回复里提到的工作目录下的路径变成可点的链接
-function linkifyPaths(container) {
-  if (!F.root) return;
-  const sep = F.root.includes("\\") ? "\\\\" : "/";
-  const root = F.root.replace(/[\\/]$/, "");
-  const re = new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + sep + `[^\\s<>"'\`|*?，。；：、！？（）()【】「」]*[^\\s<>"'\`|*?，。；：、！？（）()【】「」.,:;]`, "gi");
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
-    acceptNode: n => n.parentElement.closest("a, textarea, .approval") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
-  });
-  const nodes = [];
-  while (walker.nextNode()) if (walker.currentNode.nodeValue.match(re)) nodes.push(walker.currentNode);
-  for (const node of nodes) {
-    const frag = document.createDocumentFragment();
-    let last = 0;
-    node.nodeValue.replace(re, (m, idx) => {
-      frag.append(node.nodeValue.slice(last, idx));
-      const a = document.createElement("a");
-      a.className = "fpath"; a.textContent = m; a.dataset.fpath = m; a.title = "点击预览";
-      frag.append(a); last = idx + m.length;
-    });
-    frag.append(node.nodeValue.slice(last));
-    node.replaceWith(frag);
-  }
-}
-
-$("filesBtn").onclick = () => showFiles();
-$("filesClose").onclick = () => $("filesBox").classList.remove("show");
-$("fback").onclick = () => $("fbody").classList.remove("viewing");
-$("crumbs").onclick = e => { if (e.target.dataset.go !== undefined) openDir(e.target.dataset.go); };
-$("flist").onclick = e => { const row = e.target.closest(".fi"); if (row) preview(F.entries[+row.dataset.i]); };
-async function openLocal() {
-  const btns = document.querySelectorAll("#flocal, [data-local]");
-  btns.forEach(b => { b.disabled = true; b.dataset.label = b.textContent; b.textContent = "正在下载…"; });
-  try {
-    await window.__TAURI__.core.invoke("open_remote_file", { path: F.sel, token });
-    flash("已用本机程序打开。这是一份副本，修改后不会保存回台式机。");
-  } catch (err) { alert(String(err)); }
-  finally { btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.label; }); }
-}
-function flash(text) {
-  const d = document.createElement("div");
-  d.textContent = text;
-  d.style.cssText = "position:fixed;left:50%;bottom:32px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:8px 16px;border-radius:8px;font-size:14px;z-index:20;max-width:90vw";
-  document.body.appendChild(d); setTimeout(() => d.remove(), 4000);
-}
-$("flocal").onclick = openLocal;
-$("fcontent").addEventListener("click", e => { if (e.target.closest("[data-local]")) openLocal(); });
-$("fask").onclick = () => {
-  const t = $("input");
-  t.value = (t.value ? t.value.trimEnd() + " " : "") + winPath(F.sel) + " ";
-  $("filesBox").classList.remove("show"); autosize(); t.focus();
-};
-$("messages").addEventListener("click", e => { const a = e.target.closest("a.fpath"); if (a) showFiles(a.dataset.fpath); });
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { $("filesBox").classList.remove("show"); $("stepsBox").classList.remove("show"); }
-});
-
-$("me").textContent = me;
-if (token && me) api("/api/sessions").then(() => connect()).catch(() => {});
-else showLogin();
-renderMessages();
-</script>
+<script src="/static/app.js?v=0.3.0"></script>
+<script src="/static/admin.js?v=0.3.0"></script>
 </body>
 </html>

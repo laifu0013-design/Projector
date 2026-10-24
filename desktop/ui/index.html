@@ -24,16 +24,26 @@
   button:disabled { opacity: .6; cursor: default; }
   #status { min-height: 1.6em; margin-top: 12px; font-size: 13px; }
   #status.err { color: var(--err); }
+  .found { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .found button { margin: 0; text-align: left; background: transparent; color: inherit; border: 1px solid var(--line); font-weight: 400; display: flex; justify-content: space-between; }
+  .found button:hover, .found button.on { border-color: var(--accent); }
+  .found .u { color: var(--muted); font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 16px 0 6px; }
+  .row label { margin: 0; flex: 1; }
+  .link { background: none; border: 0; color: var(--accent); width: auto; margin: 0; padding: 0; font-weight: 400; font-size: 13px; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>连接 Claude 工作台</h1>
-  <p class="sub">填写台式机上中心服务的地址，之后打开软件会直接进入网页端。以后可以在托盘图标的菜单里修改。</p>
+  <p class="sub">选择局域网里的台式机，之后打开软件会直接进入登录页。以后可以在托盘图标的菜单里修改。</p>
+
+  <div class="row"><label>局域网里的服务器</label><button class="link" id="scan">重新查找</button></div>
+  <div class="found" id="found"><div class="hint">正在查找…</div></div>
 
   <label for="url">服务器地址</label>
   <input id="url" type="text" value="http://localhost:8080" spellcheck="false">
-  <div class="hint">台式机本机填 http://localhost:8080；其他电脑填 http://台式机IP:8080</div>
+  <div class="hint">上面找到了就点一下，会自动填好。找不到时手动填：http://台式机名:8080（Mac 上写成 台式机名.local），或者 http://台式机IP:8080</div>
 
   <label class="check"><input id="mode" type="checkbox"><span>服务端模式（只在台式机上勾选）<br>
     <span class="hint" style="font-weight:400">开机自动在后台启动中心服务和小智连接，崩溃后自动重启</span></span></label>
@@ -50,13 +60,16 @@
 const $ = id => document.getElementById(id);
 const invoke = window.__TAURI__ && window.__TAURI__.core.invoke;
 
+let cfgUrl = "";
 function setStatus(text, err) { $("status").textContent = text; $("status").className = err ? "err" : ""; }
 $("mode").onchange = () => { $("serverBox").style.display = $("mode").checked ? "block" : "none"; };
 
 async function load() {
   if (!invoke) return setStatus("这个页面需要在 Claude 工作台桌面软件里打开", true);
   const cfg = await invoke("get_config");
+  cfgUrl = cfg.server_url;
   if (cfg.server_url) $("url").value = cfg.server_url;
+  scan();
   $("mode").checked = cfg.server_mode;
   $("dir").value = cfg.project_dir;
   $("mode").onchange();
@@ -73,6 +86,28 @@ $("save").onclick = async () => {
     $("save").disabled = false;
   }
 };
+async function scan() {
+  $("found").innerHTML = '<div class="hint">正在查找…</div>';
+  try {
+    const list = await invoke("discover_servers");
+    if (!list.length) {
+      $("found").innerHTML = '<div class="hint">没找到。确认台式机上的服务已经启动、两台电脑连的是同一个网络；或者在下面手动填地址。</div>';
+      return;
+    }
+    $("found").innerHTML = "";
+    for (const s of list) {
+      const b = document.createElement("button");
+      b.innerHTML = `<span>🖥 ${s.name}</span><span class="u">${s.url}</span>`;
+      b.onclick = () => {
+        $("url").value = s.url;
+        $("found").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+      };
+      $("found").appendChild(b);
+    }
+    if (list.length === 1 && !cfgUrl) $("found").querySelector("button").click();
+  } catch (e) { $("found").innerHTML = `<div class="hint">查找失败：${e}</div>`; }
+}
+$("scan").onclick = scan;
 $("url").onkeydown = $("dir").onkeydown = e => { if (e.key === "Enter") $("save").click(); };
 load();
 </script>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-upload-local-folder"
+description = "Enables the upload_local_folder command without any pre-configured scope."
+commands.allow = ["upload_local_folder"]
+
+[[permission]]
+identifier = "deny-upload-local-folder"
+description = "Denies the upload_local_folder command without any pre-configured scope."
+commands.deny = ["upload_local_folder"]

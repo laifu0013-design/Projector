@@ -1,13 +1,14 @@
-"""台式机中心服务：管理多个 Claude 会话，供局域网网页端和小智语音共同使用。
+"""台式机中心服务：账号、多会话、权限确认、调用 Claude Code；供局域网网页端、桌面软件和小智语音共同使用。
 
-运行：python server.py   （配置见 config.bat 里的环境变量）
+运行：python server.py              （配置见 config.bat 里的环境变量）
+重置密码：python server.py reset-password 用户名 新密码
 """
 import asyncio
 import json
 import os
-import secrets
+import re
 import shutil
-import sqlite3
+import socket
 import subprocess
 import sys
 import threading
@@ -18,22 +19,23 @@ from pathlib import Path
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
-(DATA / "mcp").mkdir(parents=True, exist_ok=True)
+import files_api
+import skills_api
+from store import (BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, PORT, WS_ROOT,
+                   adopt_orphans, board_user, check_password, current_user, db, find_claude, first_admin,
+                   get_user, hash_password, is_admin, is_local, issue_token, jdump, posix_rule_path,
+                   require_admin, require_internal, session_for, session_workspace, user_public)
 
-WORK_DIR = os.environ.get("CLAUDE_WORK_DIR", "D:\\")
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
-CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-PORT = int(os.environ.get("CENTER_PORT", "8080"))
+VERSION = "0.3.0"
 TASK_TIMEOUT = float(os.environ.get("CLAUDE_TASK_TIMEOUT", "3600"))
 APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT", "1800"))
 
 # 自动放行的操作；其余操作（删除、移动、运行程序、其他命令等）都要有人确认。
 # 用 DeepSeek 等第三方模型时 WebSearch 不可用，所以不放进来。
-READ_TOOLS = ["Read", "Glob", "Grep", "WebFetch"]
+READ_TOOLS = ["Read", "Glob", "Grep", "WebFetch", "Skill"]
 SAFE_BASH = [
     "Bash(ls:*)", "Bash(pwd)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
     "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
@@ -41,8 +43,10 @@ SAFE_BASH = [
 EDIT_TOOLS = ["Edit", "Write"]
 
 WEB_HINT = (
-    "用户在电脑网页上和你对话，工作目录是用户的文件库。回答用中文。"
+    "用户在电脑上和你对话，用户名：{user}。工作目录是团队共用的文件库，回答用中文。"
     "删除、移动文件和执行命令会弹窗让用户确认；被拒绝时不要换个方式重试同样的操作，先问用户。"
+    "用户上传的本机文件在“工作区”里（消息里会给出完整路径），处理结果如果要还给用户，直接改那些文件或在同一文件夹里新建，"
+    "用户可以一键同步回自己的电脑。不要访问其他用户的工作区。"
 )
 VOICE_HINT = (
     "用户是通过一块 2 寸小屏幕的语音助手给你下指令的，指令经过语音识别和另一个助手转述，可能有错字。"
@@ -51,101 +55,61 @@ VOICE_HINT = (
     "修改文件和执行命令需要用户口头确认，尽量把需要确认的操作合并成一次；被拒绝时不要重试同样的操作。"
 )
 
-
-def _load_token() -> str:
-    token = os.environ.get("CENTER_TOKEN", "").strip()
-    if token:
-        return token
-    path = DATA / "token.txt"
-    if not path.exists():
-        path.write_text(secrets.token_urlsafe(9), encoding="utf-8")
-    return path.read_text(encoding="utf-8").strip()
+app = FastAPI()
+app.include_router(files_api.router)
+app.include_router(skills_api.router)
 
 
-TOKEN = _load_token()
-
-# ---------- 存储 ----------
-
-_db = sqlite3.connect(DATA / "center.db", check_same_thread=False)
-_db.row_factory = sqlite3.Row
-_db_lock = threading.Lock()
-_db.executescript(
-    """
-    CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY, title TEXT, source TEXT,
-        claude_session TEXT, created REAL, updated REAL);
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,
-        content TEXT, meta TEXT, created REAL);
-    CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_id);
-    """
-)
-for _col in ("bypass INTEGER DEFAULT 0", "created_by TEXT DEFAULT ''"):
-    try:
-        _db.execute(f"ALTER TABLE sessions ADD COLUMN {_col}")
-    except sqlite3.OperationalError:
-        pass  # 列已存在
-
-
-def db(sql: str, args=(), one=False):
-    with _db_lock:
-        cur = _db.execute(sql, args)
-        _db.commit()
-        rows = [dict(r) for r in cur.fetchall()]
-    return (rows[0] if rows else None) if one else rows
-
+# ---------- 会话 ----------
 
 def session_view(s: dict) -> dict:
-    return {**s, "running": s["id"] in RUNS, "pending": len(pending_for(s["id"]))}
-
-
-def get_session(sid: str) -> dict:
-    s = db("SELECT * FROM sessions WHERE id=?", (sid,), one=True)
-    if not s:
-        raise HTTPException(404, "会话不存在")
-    return s
+    owner = get_user(s.get("user_id")) or {}
+    return {**s, "running": s["id"] in RUNS, "pending": len(pending_for(s["id"])),
+            "owner": owner.get("display_name", ""), "work_dir": s.get("work_dir") or str(FILE_ROOT)}
 
 
 def push_session(sid: str) -> None:
     s = db("SELECT * FROM sessions WHERE id=?", (sid,), one=True)
     if s:
-        broadcast({"type": "session", "session": session_view(s)})
+        broadcast({"type": "session", "session": session_view(s)}, s["user_id"])
 
 
-def create_session(title: str, source: str, created_by: str = "") -> dict:
+def create_session(title: str, source: str, owner: dict, work_dir: str | None = None) -> dict:
     now = time.time()
     sid = uuid.uuid4().hex[:12]
-    db(
-        "INSERT INTO sessions (id, title, source, claude_session, created, updated, bypass, created_by) "
-        "VALUES (?,?,?,?,?,?,0,?)",
-        (sid, title, source, None, now, now, created_by),
-    )
+    db("INSERT INTO sessions (id, title, source, claude_session, created, updated, bypass, created_by, user_id, work_dir) "
+       "VALUES (?,?,?,?,?,?,0,?,?,?)",
+       (sid, title, source, None, now, now, owner["display_name"], owner["id"], work_dir))
     push_session(sid)
-    return get_session(sid)
+    return db("SELECT * FROM sessions WHERE id=?", (sid,), one=True)
 
 
 def add_message(sid: str, role: str, content: str, meta: dict | None = None) -> dict:
     now = time.time()
-    db(
-        "INSERT INTO messages (session_id, role, content, meta, created) VALUES (?,?,?,?,?)",
-        (sid, role, content, json.dumps(meta or {}, ensure_ascii=False), now),
-    )
+    db("INSERT INTO messages (session_id, role, content, meta, created) VALUES (?,?,?,?,?)",
+       (sid, role, content, jdump(meta or {}), now))
     db("UPDATE sessions SET updated=? WHERE id=?", (now, sid))
     msg = db("SELECT * FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 1", (sid,), one=True)
     msg["meta"] = json.loads(msg["meta"])
-    broadcast({"type": "message", "session_id": sid, "message": msg})
+    owner = (db("SELECT user_id FROM sessions WHERE id=?", (sid,), one=True) or {}).get("user_id")
+    broadcast({"type": "message", "session_id": sid, "message": msg}, owner)
     push_session(sid)
     return msg
 
 
-# ---------- 事件推送（SSE） ----------
+def can_bypass(user: dict) -> bool:
+    return user.get("role") == "admin" or bool(user.get("can_bypass"))
 
-_subscribers: set[asyncio.Queue] = set()
+
+# ---------- 事件推送（SSE）：每个人只收到自己会话的事件，管理员收到所有人的 ----------
+
+_subscribers: dict[asyncio.Queue, dict] = {}
 
 
-def broadcast(event: dict) -> None:
-    for q in list(_subscribers):
-        q.put_nowait(event)
+def broadcast(event: dict, owner_id) -> None:
+    for q, u in list(_subscribers.items()):
+        if owner_id is None or is_admin(u) or u["id"] == owner_id:
+            q.put_nowait(event)
 
 
 # ---------- 权限确认 ----------
@@ -185,9 +149,8 @@ def resolve_approval(aid: str, allow: bool, by: str = "", message: str = "") -> 
 
 # ---------- 调用 Claude Code（以后换别的 agent 工具，只改这一段） ----------
 
-
 def _tool_detail(args: dict) -> str:
-    for key in ("file_path", "path", "pattern", "url", "command"):
+    for key in ("file_path", "path", "pattern", "url", "command", "skill"):
         if args.get(key):
             return str(args[key])[:200]
     return ""
@@ -203,20 +166,38 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def _hint_file(source: str, hint: str) -> Path:
-    path = DATA / f"hint_{source}.txt"
+def _hint_file(sess: dict, owner: dict) -> Path:
+    hint = VOICE_HINT if sess["source"] == "voice" else WEB_HINT.format(user=owner["display_name"])
+    path = DATA / "mcp" / f"hint_{sess['id']}.txt"
     path.write_text(hint, encoding="utf-8")
     return path
 
 
-def build_command(sess: dict, hint: str) -> list[str]:
+def _deny_rules(owner: dict) -> list[str]:
+    """软隔离：不让 Claude 用文件工具碰聊天记录库、待审核的 skill 和别人的工作区。"""
+    paths = [DATA / "center.db", DATA / "internal_token.txt", DATA / "mcp", DATA / "skills" / "submissions"]
+    for u in db("SELECT id FROM users WHERE id != ?", (owner["id"],)):
+        paths += [WS_ROOT / str(u["id"]), DATA / "plugins" / str(u["id"])]
+    rules = []
+    for p in paths:
+        pat = posix_rule_path(p) + ("/**" if p.suffix == "" else "")
+        rules += [f"Read({pat})", f"Edit({pat})", f"Write({pat})"]
+    return rules
+
+
+def build_command(claude_bin: str, sess: dict, owner: dict, extra_dirs: list[Path]) -> list[str]:
     cmd = [
-        CLAUDE_BIN, "-p",
+        claude_bin, "-p",
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         # 提示词写进文件再传：Windows 上 claude 常是 .cmd 包装，中文参数经过 cmd 容易乱码
-        "--append-system-prompt-file", str(_hint_file(sess["source"], hint)),
+        "--append-system-prompt-file", str(_hint_file(sess, owner)),
+        "--disallowedTools", *_deny_rules(owner),
     ]
-    if sess["bypass"]:
+    for d in dict.fromkeys(str(p) for p in extra_dirs):
+        cmd += ["--add-dir", d]
+    if plugin := skills_api.plugin_dir_for(owner):
+        cmd += ["--plugin-dir", str(plugin)]
+    if sess["bypass"] and can_bypass(owner) and sess["source"] != "voice":
         cmd += ["--permission-mode", "bypassPermissions"]
     else:
         # 语音会话改文件也要确认；网页会话改文件自动放行
@@ -227,7 +208,7 @@ def build_command(sess: dict, hint: str) -> list[str]:
             "args": [str(BASE / "approval_mcp.py")],
             "env": {
                 "CENTER_URL": f"http://127.0.0.1:{PORT}",
-                "CENTER_TOKEN": TOKEN,
+                "CENTER_TOKEN": INTERNAL_TOKEN,
                 "CENTER_SESSION": sess["id"],
                 "PYTHONUTF8": "1",
             },
@@ -242,12 +223,12 @@ def build_command(sess: dict, hint: str) -> list[str]:
     return cmd
 
 
-def run_claude(run: "Run", prompt: str, cmd: list[str], emit) -> dict:
+def run_claude(run: "Run", prompt: str, cmd: list[str], cwd: str, emit) -> dict:
     """在线程里运行 claude，逐行解析 stream-json 事件，通过 emit 回传；返回最终结果。"""
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace", cwd=WORK_DIR,
+        text=True, encoding="utf-8", errors="replace", cwd=cwd,
         # 等人确认可能要很久，放宽 MCP 工具调用的超时
         env={**os.environ, "MCP_TOOL_TIMEOUT": str(int(APPROVAL_TIMEOUT * 1000) + 60000)},
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -255,6 +236,7 @@ def run_claude(run: "Run", prompt: str, cmd: list[str], emit) -> dict:
     run.proc = proc
     # stderr 要单独读走，否则输出多了会把管道塞满，claude 卡住不动
     err_tail: list[str] = []
+
     def drain():
         for line in proc.stderr:
             err_tail.append(line)
@@ -303,10 +285,10 @@ def run_claude(run: "Run", prompt: str, cmd: list[str], emit) -> dict:
 
 # ---------- 会话运行 ----------
 
-
 class Run:
-    def __init__(self, sid: str):
+    def __init__(self, sid: str, owner_id: int):
         self.sid = sid
+        self.owner_id = owner_id
         self.proc: subprocess.Popen | None = None
         self.text = ""
         self.tools: list[dict] = []
@@ -327,23 +309,47 @@ def _on_event(run: Run, ev: dict) -> None:
         run.text += ev["text"]
     elif ev["type"] == "tool":
         run.tools.append({"name": ev["name"], "detail": ev["detail"]})
-    broadcast({**ev, "session_id": run.sid})
+    broadcast({**ev, "session_id": run.sid}, run.owner_id)
 
 
-async def start_turn(sid: str, text: str, author: str = "") -> Run:
-    if not CLAUDE_BIN:
-        raise HTTPException(500, "台式机上找不到 claude 命令，请先安装 Claude Code")
+def build_prompt(text: str, refs: list[str], skill: str) -> str:
+    head = []
+    if skill:
+        head.append(f"【请使用技能】{skills_api.PLUGIN_NAME}:{skill}（用 Skill 工具调用它来完成这次任务）")
+    if refs:
+        head.append("【用户引用的文件/文件夹】\n" + "\n".join(f"- {r}" for r in refs))
+    return ("\n\n".join(head) + "\n\n" + text) if head else text
+
+
+async def start_turn(sess: dict, text: str, author: dict, refs: list[str] | None = None, skill: str = "") -> Run:
+    claude_bin = find_claude()
+    if not claude_bin:
+        raise HTTPException(500, "台式机上找不到 claude 命令：请先安装 Claude Code，或在 config.bat 里设置 CLAUDE_BIN")
+    sid = sess["id"]
     if sid in RUNS:
         raise HTTPException(409, "这个会话还有任务在进行，请等它完成或先停止")
-    sess = get_session(sid)
-    run = RUNS[sid] = Run(sid)
-    add_message(sid, "user", text, {"author": author, "bypass": bool(sess["bypass"])})
-    hint = VOICE_HINT if sess["source"] == "voice" else WEB_HINT
-    asyncio.create_task(_drive(run, sess, text, build_command(sess, hint)))
+    owner = get_user(sess["user_id"]) or author
+    refs = refs or []
+    cwd = sess.get("work_dir") or str(FILE_ROOT)
+    if not Path(cwd).is_dir():
+        raise HTTPException(400, f"工作文件夹不存在：{cwd}")
+    extra = [session_workspace(sess)]
+    for r in refs:
+        p = Path(r)
+        extra.append(p if p.is_dir() else p.parent)
+    run = RUNS[sid] = Run(sid, sess["user_id"])
+    meta = {"author": author["display_name"], "bypass": bool(sess["bypass"])}
+    if refs:
+        meta["refs"] = refs
+    if skill:
+        meta["skill"] = skill
+    add_message(sid, "user", text, meta)
+    cmd = build_command(claude_bin, sess, owner, extra)
+    asyncio.create_task(_drive(run, build_prompt(text, refs, skill), cmd, cwd))
     return run
 
 
-async def _drive(run: Run, sess: dict, text: str, cmd: list[str]) -> None:
+async def _drive(run: Run, prompt: str, cmd: list[str], cwd: str) -> None:
     loop = asyncio.get_running_loop()
 
     def emit(ev):
@@ -351,7 +357,7 @@ async def _drive(run: Run, sess: dict, text: str, cmd: list[str]) -> None:
 
     started = time.time()
     try:
-        final = await asyncio.to_thread(run_claude, run, text, cmd, emit)
+        final = await asyncio.to_thread(run_claude, run, prompt, cmd, cwd, emit)
     except Exception as e:
         final = {"is_error": True, "result": f"启动 claude 失败：{e}"}
     await asyncio.sleep(0)  # 让线程里排队的事件先处理完
@@ -381,31 +387,187 @@ async def _drive(run: Run, sess: dict, text: str, cmd: list[str]) -> None:
     push_session(run.sid)
 
 
-# ---------- HTTP 接口 ----------
+# ---------- 登录和账号 ----------
 
-app = FastAPI()
+class Credentials(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
 
 
-def auth(request: Request) -> None:
-    given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-    given = given or request.query_params.get("token", "")
-    if not secrets.compare_digest(given, TOKEN):
-        raise HTTPException(401, "访问密码不对")
+class ChangePassword(BaseModel):
+    old: str
+    new: str
 
+
+def _check_new_password(pw: str) -> None:
+    if len(pw) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+
+
+def me_view(u: dict) -> dict:
+    return {**user_public(u), "can_bypass": can_bypass(u)}
+
+
+@app.get("/api/setup")
+def setup_state(request: Request):
+    return {"needed": first_admin() is None, "local": is_local(request), "version": VERSION}
+
+
+@app.post("/api/setup")
+def setup_admin(body: Credentials, request: Request):
+    """第一次运行：只能在台式机本机上创建第一个管理员。"""
+    if first_admin():
+        raise HTTPException(409, "已经有管理员了")
+    if not is_local(request):
+        raise HTTPException(403, "请在台式机本机上打开 http://localhost:%d 创建管理员" % PORT)
+    _check_new_password(body.password)
+    username = body.username.strip()
+    if not username or db("SELECT 1 FROM users WHERE username=?", (username,), one=True):
+        raise HTTPException(400, "用户名不能为空或已存在")
+    db("INSERT INTO users (username, display_name, pw_hash, role, created) VALUES (?,?,?,?,?)",
+       (username, body.display_name.strip() or username, hash_password(body.password), "admin", time.time()))
+    adopt_orphans()
+    u = db("SELECT * FROM users WHERE username=?", (username,), one=True)
+    return {"token": issue_token(u["id"]), "user": me_view(u)}
+
+
+@app.post("/api/login")
+async def login(body: Credentials):
+    u = db("SELECT * FROM users WHERE username=?", (body.username.strip(),), one=True)
+    if not u or u["disabled"] or u["role"] not in ("admin", "user") or not check_password(body.password, u["pw_hash"]):
+        await asyncio.sleep(1)  # 放慢猜密码
+        raise HTTPException(401, "用户名或密码不对")
+    return {"token": issue_token(u["id"]), "user": me_view(u)}
+
+
+@app.post("/api/logout")
+def logout(request: Request, user: dict = Depends(current_user)):
+    token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    db("DELETE FROM tokens WHERE token=?", (token,))
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def me(user: dict = Depends(current_user)):
+    return me_view(user)
+
+
+@app.post("/api/me/password")
+def change_password(body: ChangePassword, user: dict = Depends(current_user)):
+    if not check_password(body.old, user["pw_hash"]):
+        raise HTTPException(400, "原密码不对")
+    _check_new_password(body.new)
+    db("UPDATE users SET pw_hash=? WHERE id=?", (hash_password(body.new), user["id"]))
+    return {"ok": True}
+
+
+# ---------- 管理员：用户 ----------
+
+class UserPatch(BaseModel):
+    display_name: str | None = None
+    password: str | None = None
+    role: str | None = None
+    can_bypass: bool | None = None
+    disabled: bool | None = None
+
+
+def _target_user(uid: int) -> dict:
+    u = get_user(uid)
+    if not u:
+        raise HTTPException(404, "用户不存在")
+    return u
+
+
+@app.get("/api/admin/users")
+def admin_users(admin: dict = Depends(require_admin)):
+    rows = db("SELECT u.*, (SELECT COUNT(*) FROM sessions s WHERE s.user_id=u.id) AS sessions, "
+              "(SELECT MAX(last_used) FROM tokens t WHERE t.user_id=u.id) AS last_seen FROM users u ORDER BY u.id")
+    return [{**user_public(r), "sessions": r["sessions"], "last_seen": r["last_seen"]} for r in rows]
+
+
+@app.post("/api/admin/users")
+def admin_create_user(body: Credentials, admin: dict = Depends(require_admin)):
+    username = body.username.strip()
+    if not re.fullmatch(r"\S{1,32}", username):
+        raise HTTPException(400, "用户名不能有空格，最多 32 个字")
+    if db("SELECT 1 FROM users WHERE username=?", (username,), one=True):
+        raise HTTPException(400, "这个用户名已经有了")
+    _check_new_password(body.password)
+    db("INSERT INTO users (username, display_name, pw_hash, role, created) VALUES (?,?,?,?,?)",
+       (username, body.display_name.strip() or username, hash_password(body.password), "user", time.time()))
+    return user_public(db("SELECT * FROM users WHERE username=?", (username,), one=True))
+
+
+@app.patch("/api/admin/users/{uid}")
+def admin_update_user(uid: int, body: UserPatch, admin: dict = Depends(require_admin)):
+    u = _target_user(uid)
+    if u["role"] == "device" and (body.role or body.password or body.disabled):
+        raise HTTPException(400, "板子账号不能登录，只能改名字和技能")
+    if body.display_name is not None:
+        db("UPDATE users SET display_name=? WHERE id=?", (body.display_name.strip()[:32] or u["username"], uid))
+    if body.password:
+        _check_new_password(body.password)
+        db("UPDATE users SET pw_hash=? WHERE id=?", (hash_password(body.password), uid))
+        db("DELETE FROM tokens WHERE user_id=?", (uid,))  # 重置密码后要重新登录
+    if body.role in ("admin", "user") and body.role != u["role"]:
+        admins = db("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND disabled=0", one=True)["n"]
+        if u["role"] == "admin" and admins <= 1:
+            raise HTTPException(400, "至少要保留一个管理员")
+        db("UPDATE users SET role=? WHERE id=?", (body.role, uid))
+    if body.can_bypass is not None:
+        db("UPDATE users SET can_bypass=? WHERE id=?", (int(body.can_bypass), uid))
+        if not body.can_bypass:
+            db("UPDATE sessions SET bypass=0 WHERE user_id=?", (uid,))
+    if body.disabled is not None:
+        if body.disabled and uid == admin["id"]:
+            raise HTTPException(400, "不能停用自己")
+        db("UPDATE users SET disabled=? WHERE id=?", (int(body.disabled), uid))
+        if body.disabled:
+            db("DELETE FROM tokens WHERE user_id=?", (uid,))
+    return user_public(get_user(uid))
+
+
+@app.delete("/api/admin/users/{uid}")
+def admin_delete_user(uid: int, admin: dict = Depends(require_admin)):
+    u = _target_user(uid)
+    if u["role"] == "device" or uid == admin["id"]:
+        raise HTTPException(400, "不能删除板子账号或自己")
+    if any(r.owner_id == uid for r in RUNS.values()):
+        raise HTTPException(409, "这个用户还有任务在进行")
+    for s in db("SELECT id FROM sessions WHERE user_id=?", (uid,)):
+        db("DELETE FROM messages WHERE session_id=?", (s["id"],))
+    for sql in ("DELETE FROM sessions WHERE user_id=?", "DELETE FROM links WHERE user_id=?",
+                "DELETE FROM tokens WHERE user_id=?", "DELETE FROM skill_access WHERE user_id=?",
+                "DELETE FROM users WHERE id=?"):
+        db(sql, (uid,))
+    shutil.rmtree(WS_ROOT / str(uid), ignore_errors=True)
+    shutil.rmtree(DATA / "plugins" / str(uid), ignore_errors=True)
+    return {"ok": True}
+
+
+@app.get("/api/admin/sessions")
+def admin_sessions(admin: dict = Depends(require_admin)):
+    return [session_view(s) for s in db("SELECT * FROM sessions ORDER BY updated DESC")]
+
+
+# ---------- 会话接口 ----------
 
 class NewSession(BaseModel):
     title: str = "新会话"
-    author: str = ""
+    work_dir: str | None = None
 
 
 class UpdateSession(BaseModel):
     title: str | None = None
     bypass: bool | None = None
+    work_dir: str | None = None
 
 
 class Send(BaseModel):
     text: str
-    author: str = ""
+    refs: list[str] = []
+    skill: str = ""
 
 
 class ApprovalRequest(BaseModel):
@@ -416,7 +578,6 @@ class ApprovalRequest(BaseModel):
 
 class Decision(BaseModel):
     allow: bool
-    author: str = ""
 
 
 class VoiceTask(BaseModel):
@@ -430,24 +591,40 @@ class VoiceConfirm(BaseModel):
     wait: float = 40
 
 
+def _check_work_dir(path: str, user: dict) -> str:
+    p = files_api.resolve_path(path, user)
+    if not p.is_dir():
+        raise HTTPException(400, "工作文件夹要选一个文件夹")
+    return str(p)
+
+
+def _owner_only(sess: dict, user: dict) -> None:
+    if sess["user_id"] != user["id"]:
+        raise HTTPException(403, "这是别人的会话，只能查看")
+
+
 @app.get("/")
 def index():
-    return FileResponse(BASE / "static" / "index.html")
+    return FileResponse(BASE / "static" / "index.html", headers={"Cache-Control": "no-cache"})
 
 
-@app.get("/api/sessions", dependencies=[Depends(auth)])
-def list_sessions():
-    return [session_view(s) for s in db("SELECT * FROM sessions ORDER BY updated DESC")]
+app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 
 
-@app.post("/api/sessions", dependencies=[Depends(auth)])
-def new_session(body: NewSession):
-    return session_view(create_session(body.title.strip()[:40] or "新会话", "web", body.author.strip()[:20]))
+@app.get("/api/sessions")
+def list_sessions(user: dict = Depends(current_user)):
+    return [session_view(s) for s in db("SELECT * FROM sessions WHERE user_id=? ORDER BY updated DESC", (user["id"],))]
 
 
-@app.get("/api/sessions/{sid}", dependencies=[Depends(auth)])
-def read_session(sid: str):
-    s = get_session(sid)
+@app.post("/api/sessions")
+def new_session(body: NewSession, user: dict = Depends(current_user)):
+    work_dir = _check_work_dir(body.work_dir, user) if body.work_dir else None
+    return session_view(create_session(body.title.strip()[:40] or "新会话", "web", user, work_dir))
+
+
+@app.get("/api/sessions/{sid}")
+def read_session(sid: str, user: dict = Depends(current_user)):
+    s = session_for(sid, user)
     msgs = db("SELECT * FROM messages WHERE session_id=? ORDER BY id", (sid,))
     for m in msgs:
         m["meta"] = json.loads(m["meta"])
@@ -461,45 +638,61 @@ def read_session(sid: str):
     }
 
 
-@app.patch("/api/sessions/{sid}", dependencies=[Depends(auth)])
-def update_session(sid: str, body: UpdateSession):
-    s = get_session(sid)
+@app.patch("/api/sessions/{sid}")
+def update_session(sid: str, body: UpdateSession, user: dict = Depends(current_user)):
+    s = session_for(sid, user)
+    _owner_only(s, user)
     if body.title is not None:
         db("UPDATE sessions SET title=? WHERE id=?", (body.title.strip()[:40] or "未命名", sid))
     if body.bypass is not None:
         if body.bypass and s["source"] == "voice":
             raise HTTPException(400, "语音会话不能完全放行")
+        if body.bypass and not can_bypass(user):
+            raise HTTPException(403, "你没有“完全放行”的权限，请找管理员开通")
         db("UPDATE sessions SET bypass=? WHERE id=?", (int(body.bypass), sid))
+    if body.work_dir is not None:
+        if s["claude_session"]:
+            raise HTTPException(409, "会话开始后不能换工作文件夹（Claude 的记忆跟着文件夹走），请新建一个会话")
+        db("UPDATE sessions SET work_dir=? WHERE id=?", (_check_work_dir(body.work_dir, user), sid))
     push_session(sid)
-    return session_view(get_session(sid))
+    return session_view(session_for(sid, user))
 
 
-@app.delete("/api/sessions/{sid}", dependencies=[Depends(auth)])
-def delete_session(sid: str):
-    get_session(sid)
+@app.delete("/api/sessions/{sid}")
+def delete_session(sid: str, user: dict = Depends(current_user)):
+    s = session_for(sid, user)
     if sid in RUNS:
         raise HTTPException(409, "任务进行中，请先停止")
     db("DELETE FROM messages WHERE session_id=?", (sid,))
     db("DELETE FROM sessions WHERE id=?", (sid,))
-    (DATA / "mcp" / f"{sid}.json").unlink(missing_ok=True)
-    broadcast({"type": "session_deleted", "session_id": sid})
+    db("DELETE FROM links WHERE session_id=?", (sid,))
+    shutil.rmtree(WS_ROOT / str(s["user_id"]) / sid, ignore_errors=True)
+    for f in (f"{sid}.json", f"hint_{sid}.txt"):
+        (DATA / "mcp" / f).unlink(missing_ok=True)
+    broadcast({"type": "session_deleted", "session_id": sid}, s["user_id"])
     return {"ok": True}
 
 
-@app.post("/api/sessions/{sid}/messages", dependencies=[Depends(auth)])
-async def send_message(sid: str, body: Send):
-    s = get_session(sid)
+@app.post("/api/sessions/{sid}/messages")
+async def send_message(sid: str, body: Send, user: dict = Depends(current_user)):
+    s = session_for(sid, user)
+    _owner_only(s, user)
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "内容为空")
+    refs = [str(files_api.resolve_path(r, user)) for r in body.refs[:30]]
+    skill = body.skill.strip()
+    if skill and skill not in skills_api.user_skill_names(user):
+        raise HTTPException(403, "你没有这个技能的使用权限")
     if s["title"] == "新会话":
         db("UPDATE sessions SET title=? WHERE id=?", (text[:20], sid))
-    await start_turn(sid, text, body.author.strip()[:20])
+    await start_turn(s, text, user, refs, skill)
     return {"ok": True}
 
 
-@app.post("/api/sessions/{sid}/stop", dependencies=[Depends(auth)])
-def stop_session(sid: str):
+@app.post("/api/sessions/{sid}/stop")
+def stop_session(sid: str, user: dict = Depends(current_user)):
+    session_for(sid, user)
     run = RUNS.get(sid)
     if run and run.proc:
         run.stopped = True
@@ -510,10 +703,10 @@ def stop_session(sid: str):
     return {"ok": True}
 
 
-@app.get("/api/sessions/{sid}/transcript", dependencies=[Depends(auth)])
-def transcript(sid: str):
+@app.get("/api/sessions/{sid}/transcript")
+def transcript(sid: str, user: dict = Depends(current_user)):
     """读取 Claude Code 自己保存的完整记录（每一步思考、工具调用和返回）。"""
-    s = get_session(sid)
+    s = session_for(sid, user)
     if not s["claude_session"]:
         return {"steps": [], "note": "这个会话还没有记录"}
     files = list((CLAUDE_HOME / "projects").glob(f"*/{s['claude_session']}.jsonl"))
@@ -548,13 +741,14 @@ def transcript(sid: str):
                     text = str(c or "")
                     steps.append({"kind": "tool_result", "error": bool(b.get("is_error")),
                                   "text": text[:3000] + ("……（已截断）" if len(text) > 3000 else "")})
-    return {"steps": steps, "file": str(files[0])}
+    return {"steps": steps}
 
 
 # 给 approval_mcp.py 用：挂起直到有人在网页或语音里做出决定
-@app.post("/api/approvals", dependencies=[Depends(auth)])
-async def request_approval(body: ApprovalRequest):
-    if body.session_id not in RUNS:
+@app.post("/api/approvals")
+async def request_approval(body: ApprovalRequest, _: dict = Depends(require_internal)):
+    run = RUNS.get(body.session_id)
+    if not run:
         return {"allow": False, "message": "任务已结束"}
     aid = uuid.uuid4().hex[:8]
     future = asyncio.get_running_loop().create_future()
@@ -562,7 +756,7 @@ async def request_approval(body: ApprovalRequest):
         "id": aid, "session_id": body.session_id, "tool": body.tool_name, "input": body.input,
         "summary": approval_summary(body.tool_name, body.input), "created": time.time(), "future": future,
     }
-    broadcast({"type": "approval", "approval": approval_public(a)})
+    broadcast({"type": "approval", "approval": approval_public(a)}, run.owner_id)
     push_session(body.session_id)
     try:
         allow, message = await asyncio.wait_for(future, APPROVAL_TIMEOUT)
@@ -571,21 +765,25 @@ async def request_approval(body: ApprovalRequest):
         add_message(body.session_id, "event", f"⌛ 确认超时，已拒绝：{a['summary']}")
     finally:
         APPROVALS.pop(aid, None)
-        broadcast({"type": "approval_done", "id": aid, "session_id": body.session_id})
+        broadcast({"type": "approval_done", "id": aid, "session_id": body.session_id}, run.owner_id)
         push_session(body.session_id)
     return {"allow": allow, "message": message}
 
 
-@app.post("/api/approvals/{aid}", dependencies=[Depends(auth)])
-def decide_approval(aid: str, body: Decision):
-    resolve_approval(aid, body.allow, body.author.strip()[:20])
+@app.post("/api/approvals/{aid}")
+def decide_approval(aid: str, body: Decision, user: dict = Depends(current_user)):
+    a = APPROVALS.get(aid)
+    if not a:
+        raise HTTPException(404, "这个确认请求已经处理过或已过期")
+    session_for(a["session_id"], user)  # 只有会话主人和管理员能确认
+    resolve_approval(aid, body.allow, user["display_name"])
     return {"ok": True}
 
 
-@app.get("/api/events", dependencies=[Depends(auth)])
-async def events(request: Request):
+@app.get("/api/events")
+async def events(request: Request, user: dict = Depends(current_user)):
     q: asyncio.Queue = asyncio.Queue()
-    _subscribers.add(q)
+    _subscribers[q] = user
 
     async def stream():
         try:
@@ -597,167 +795,14 @@ async def events(request: Request):
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
         finally:
-            _subscribers.discard(q)
+            _subscribers.pop(q, None)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ---------- 文件浏览和预览（只读，限制在工作目录里） ----------
-
-FILE_ROOT = Path(os.environ.get("FILES_ROOT") or WORK_DIR).resolve()
-SOFFICE = os.environ.get("SOFFICE") or shutil.which("soffice") or next(
-    (p for p in (r"C:\Program Files\LibreOffice\program\soffice.exe",
-                 r"C:\Program Files (x86)\LibreOffice\program\soffice.exe") if Path(p).is_file()), None)
-HIDDEN_NAMES = {"$recycle.bin", "system volume information", "pagefile.sys", "swapfile.sys", "hiberfil.sys",
-                "dumpstack.log.tmp", "config.msi", "recovery"}
-TEXT_LIMIT = 1024 * 1024
-_soffice_lock = asyncio.Lock()
-
-
-def resolve_path(path: str) -> Path:
-    """把网页传来的路径（相对工作目录，或 D:\\xx 这样的完整路径）转成真实路径，不允许跑出工作目录。"""
-    raw = (path or "").strip().strip('"')
-    p = Path(raw)
-    target = (p if p.is_absolute() else FILE_ROOT / raw.lstrip("/\\")).resolve()
-    if target != FILE_ROOT and not target.is_relative_to(FILE_ROOT):
-        raise HTTPException(403, "只能访问工作目录里的文件")
-    if not target.exists():
-        raise HTTPException(404, "文件不存在")
-    return target
-
-
-def rel_path(p: Path) -> str:
-    return "" if p == FILE_ROOT else p.relative_to(FILE_ROOT).as_posix()
-
-
-def _hidden(entry: os.DirEntry) -> bool:
-    if entry.name.lower() in HIDDEN_NAMES or entry.name.startswith("~$"):
-        return True
-    attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
-    return bool(attrs & 0x6)  # Windows 的隐藏、系统属性
-
-
-def list_dir(d: Path, limit: int = 3000) -> list[dict]:
-    items = []
-    try:
-        with os.scandir(d) as it:
-            for e in it:
-                try:
-                    if _hidden(e):
-                        continue
-                    st = e.stat()
-                    is_dir = e.is_dir()
-                except OSError:
-                    continue  # 没权限或已删除
-                items.append({"name": e.name, "dir": is_dir, "size": 0 if is_dir else st.st_size,
-                              "mtime": st.st_mtime, "path": rel_path(Path(e.path))})
-                if len(items) >= limit:
-                    break
-    except PermissionError:
-        raise HTTPException(403, "没有权限打开这个文件夹")
-    items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
-    return items
-
-
-@app.get("/api/files", dependencies=[Depends(auth)])
-def files_list(path: str = ""):
-    """列出文件夹；传的是文件就列出它所在的文件夹，并用 select 标出这个文件。"""
-    target = resolve_path(path)
-    select = None
-    if target.is_file():
-        select, target = rel_path(target), target.parent
-    return {"root": str(FILE_ROOT), "path": rel_path(target), "select": select,
-            "entries": list_dir(target), "office": bool(SOFFICE)}
-
-
-@app.get("/api/files/search", dependencies=[Depends(auth)])
-def files_search(q: str, path: str = ""):
-    """按文件名搜索，最多 200 条、最多搜 8 秒。"""
-    base, words = resolve_path(path), q.lower().split()
-    if not words:
-        return {"results": [], "partial": False}
-    results, end, partial = [], time.time() + 8, False
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [n for n in dirnames if n.lower() not in HIDDEN_NAMES and not n.startswith(".")]
-        for name in dirnames + filenames:
-            if all(w in name.lower() for w in words):
-                full = Path(dirpath) / name
-                try:
-                    st = full.stat()
-                except OSError:
-                    continue
-                results.append({"name": name, "dir": full.is_dir(), "size": st.st_size, "mtime": st.st_mtime,
-                                "path": rel_path(full)})
-        if len(results) >= 200 or time.time() > end:
-            partial = True
-            break
-    return {"results": results[:200], "partial": partial}
-
-
-@app.get("/api/files/raw", dependencies=[Depends(auth)])
-def files_raw(path: str, download: bool = False):
-    target = resolve_path(path)
-    if not target.is_file():
-        raise HTTPException(400, "这是文件夹")
-    return FileResponse(target, filename=target.name,
-                        content_disposition_type="attachment" if download else "inline")
-
-
-@app.get("/api/files/text", dependencies=[Depends(auth)])
-def files_text(path: str):
-    target = resolve_path(path)
-    data = target.read_bytes()[:TEXT_LIMIT + 1]
-    truncated = len(data) > TEXT_LIMIT
-    data = data[:TEXT_LIMIT]
-    for enc in ("utf-8-sig", "gb18030", "utf-16"):  # 中文 Windows 上的老文件常是 GBK
-        try:
-            text = data.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        text, enc = data.decode("utf-8", errors="replace"), "utf-8"
-    return {"text": text, "truncated": truncated, "encoding": enc}
-
-
-@app.get("/api/files/pdf", dependencies=[Depends(auth)])
-async def files_pdf(path: str):
-    """用 LibreOffice 把 Office 文件转成 PDF 预览，按修改时间缓存。"""
-    if not SOFFICE:
-        raise HTTPException(501, "台式机没装 LibreOffice，这种文件不能预览")
-    target = resolve_path(path)
-    st = target.stat()
-    key = uuid.uuid5(uuid.NAMESPACE_URL, f"{target}|{st.st_mtime_ns}|{st.st_size}").hex
-    cache = DATA / "preview"
-    pdf = cache / f"{key}.pdf"
-    if not pdf.exists():
-        async with _soffice_lock:  # soffice 同时只能跑一个
-            if not pdf.exists():
-                work = cache / key
-                work.mkdir(parents=True, exist_ok=True)
-                src = work / ("src" + target.suffix.lower())
-                shutil.copyfile(target, src)  # 复制一份再转，原文件名带特殊字符时 soffice 容易失败
-                cmd = [SOFFICE, "--headless", "--norestore", f"-env:UserInstallation={(cache / 'profile').as_uri()}",
-                       "--convert-to", "pdf", "--outdir", str(work), str(src)]
-                try:
-                    await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=180,
-                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                except subprocess.TimeoutExpired:
-                    pass
-                out = work / "src.pdf"
-                if out.exists():
-                    out.replace(pdf)
-                shutil.rmtree(work, ignore_errors=True)
-    if not pdf.exists():
-        raise HTTPException(500, "转换失败，可以下载后用本机程序打开")
-    return FileResponse(pdf, media_type="application/pdf", filename=target.stem + ".pdf",
-                        content_disposition_type="inline")
-
-
-# ---------- 给小智 MCP 工具用 ----------
+# ---------- 给小智 MCP 工具用（语音会话都归“板子”账号） ----------
 # 每个新话题开一个语音会话，追问时接着最近的语音会话
-
 
 def latest_voice_session() -> dict | None:
     return db("SELECT * FROM sessions WHERE source='voice' ORDER BY updated DESC LIMIT 1", one=True)
@@ -784,8 +829,8 @@ async def wait_voice(sid: str, timeout: float) -> dict:
         await asyncio.sleep(0.3)
 
 
-@app.post("/api/voice", dependencies=[Depends(auth)])
-async def voice_task(body: VoiceTask):
+@app.post("/api/voice")
+async def voice_task(body: VoiceTask, _: dict = Depends(require_internal)):
     task = body.task.strip()
     last = latest_voice_session()
     if last and last["id"] in RUNS:
@@ -793,13 +838,14 @@ async def voice_task(body: VoiceTask):
         if state["status"] == "running":
             return {"status": "busy", "reply": "上一个语音任务还在进行，请等它完成后再下新任务。"}
         return state  # 有操作在等确认，先把它告诉用户
-    sess = last if (body.continue_last and last) else create_session("🎤 " + task[:18], "voice", "语音")
-    await start_turn(sess["id"], task, "语音")
+    board = board_user()
+    sess = last if (body.continue_last and last) else create_session("🎤 " + task[:18], "voice", board)
+    await start_turn(sess, task, board)
     return await wait_voice(sess["id"], body.wait)
 
 
-@app.post("/api/voice/confirm", dependencies=[Depends(auth)])
-async def voice_confirm(body: VoiceConfirm):
+@app.post("/api/voice/confirm")
+async def voice_confirm(body: VoiceConfirm, _: dict = Depends(require_internal)):
     last = latest_voice_session()
     pending = pending_for(last["id"]) if last else []
     if not pending:
@@ -809,16 +855,58 @@ async def voice_confirm(body: VoiceConfirm):
     return await wait_voice(last["id"], body.wait)
 
 
-@app.get("/api/voice/status", dependencies=[Depends(auth)])
-async def voice_status():
+@app.get("/api/voice/status")
+async def voice_status(_: dict = Depends(require_internal)):
     last = latest_voice_session()
     if not last:
         return {"status": "none", "reply": "还没有执行过语音任务。"}
     return await wait_voice(last["id"], 0)
 
 
-if __name__ == "__main__":
-    print(f"中心服务启动：http://本机IP:{PORT}   访问密码：{TOKEN}")
-    print(f"工作目录 {WORK_DIR}，claude 路径 {CLAUDE_BIN}")
-    print(f"文件预览：{FILE_ROOT}，Office 转换：{SOFFICE or '没装 LibreOffice，Word/Excel 用网页内置预览，PPT 只能下载'}")
+# ---------- 局域网自动发现：桌面软件广播询问，这里回复自己的名字和端口 ----------
+
+def discovery_responder() -> None:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", DISCOVERY_PORT))
+    except OSError as e:
+        print(f"  自动发现端口 {DISCOVERY_PORT} 被占用，同事的软件需要手动填地址：{e}")
+        return
+    reply = json.dumps({"app": "projector", "name": socket.gethostname(), "port": PORT, "version": VERSION},
+                       ensure_ascii=False).encode()
+    while True:
+        try:
+            data, addr = sock.recvfrom(256)
+            if data.startswith(b"PROJECTOR_DISCOVER"):
+                sock.sendto(reply, addr)
+        except OSError:
+            time.sleep(1)
+
+
+def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "reset-password":
+        if len(sys.argv) != 4:
+            sys.exit("用法：python server.py reset-password 用户名 新密码")
+        u = db("SELECT * FROM users WHERE username=?", (sys.argv[2],), one=True)
+        if not u:
+            sys.exit("没有这个用户")
+        db("UPDATE users SET pw_hash=?, disabled=0 WHERE id=?", (hash_password(sys.argv[3]), u["id"]))
+        db("DELETE FROM tokens WHERE user_id=?", (u["id"],))
+        print(f"已重置 {u['username']} 的密码")
+        return
+    host = socket.gethostname()
+    claude_bin = find_claude()
+    print(f"Projector 中心服务 v{VERSION}")
+    print(f"  本机打开：http://localhost:{PORT}    其他电脑：http://{host}:{PORT}（或在桌面软件里自动查找）")
+    if not first_admin():
+        print(f"  还没有管理员：请在本机浏览器打开 http://localhost:{PORT} 创建")
+    print(f"  工作目录 {FILE_ROOT}")
+    print(f"  claude：{claude_bin or '没找到！请安装 Claude Code，或在 config.bat 里设置 CLAUDE_BIN'}")
+    print(f"  Office 预览：{files_api.SOFFICE or '没装 LibreOffice，PPT 等只能用本机程序打开'}")
+    threading.Thread(target=discovery_responder, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

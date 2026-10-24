@@ -6,6 +6,7 @@
 import logging
 import os
 import sys
+from pathlib import Path
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -14,7 +15,15 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s [
 log = logging.getLogger("claude_mcp")
 
 CENTER_URL = os.environ.get("CENTER_URL", f"http://127.0.0.1:{os.environ.get('CENTER_PORT', '8080')}")
-CENTER_TOKEN = os.environ.get("CENTER_TOKEN", "")
+# 中心服务启动时生成的内部令牌（data/internal_token.txt），不用再配密码
+_TOKEN_FILE = Path(__file__).resolve().parent / "data" / "internal_token.txt"
+
+
+def _token() -> str:
+    try:
+        return _TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 # 同步等待这么久，超时就转为后台任务，避免小智那边等太久
 WAIT_SECONDS = float(os.environ.get("CLAUDE_WAIT_SECONDS", "40"))
 MAX_REPLY_CHARS = 500
@@ -26,10 +35,12 @@ async def _call(method: str, path: str, **kwargs) -> str:
     try:
         async with httpx.AsyncClient(timeout=WAIT_SECONDS + 15) as client:
             r = await client.request(method, CENTER_URL + path,
-                                     headers={"Authorization": f"Bearer {CENTER_TOKEN}"}, **kwargs)
+                                     headers={"Authorization": f"Bearer {_token()}"}, **kwargs)
     except httpx.HTTPError as e:
         log.warning("连不上中心服务：%r", e)
         return "连不上台式机上的中心服务，请确认 server.py 已经启动。"
+    if r.status_code == 401:
+        return "中心服务拒绝了连接：请确认 claude_mcp.py 和 server.py 在同一个文件夹，并先启动 server.py。"
     if r.status_code != 200:
         return f"中心服务返回错误：{r.json().get('detail', r.status_code)}"
     reply = r.json()["reply"]

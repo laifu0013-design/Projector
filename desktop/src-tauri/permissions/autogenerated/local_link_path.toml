@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-local-link-path"
+description = "Enables the local_link_path command without any pre-configured scope."
+commands.allow = ["local_link_path"]
+
+[[permission]]
+identifier = "deny-local-link-path"
+description = "Denies the local_link_path command without any pre-configured scope."
+commands.deny = ["local_link_path"]

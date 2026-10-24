@@ -329,7 +329,10 @@ fn allow_remote(app: &AppHandle, url: &Url) {
         .remote(pattern)
         .window("main")
         .permission("notification:default")
-        .permission("allow-open-remote-file");
+        .permission("allow-open-remote-file")
+        .permission("allow-upload-local-folder")
+        .permission("allow-local-link-path")
+        .permission("allow-sync-back");
     if let Err(e) = app.add_capability(cap) {
         eprintln!("添加网页权限失败：{e}");
     }
@@ -459,6 +462,255 @@ async fn open_remote_file(app: AppHandle, path: String, token: String) -> Result
     .map_err(|e| e.to_string())?
 }
 
+
+// ---------- 网页调用：本机文件夹上传到台式机工作区，处理完同步回来 ----------
+
+const SKIP_DIRS: &[&str] = &[".git", "node_modules", "__pycache__", ".projector备份", "$RECYCLE.BIN", "System Volume Information"];
+const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_UPLOAD_FILES: usize = 20_000;
+
+fn links_path(app: &AppHandle) -> PathBuf {
+    app.path().app_config_dir().expect("找不到配置目录").join("links.json")
+}
+
+/// 上传过的文件夹：link id → 本机路径。只存在本机，同步时只往自己选过的文件夹里写。
+fn load_links(app: &AppHandle) -> HashMap<String, String> {
+    fs::read_to_string(links_path(app)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_links(app: &AppHandle, links: &HashMap<String, String>) {
+    let path = links_path(app);
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(path, serde_json::to_string_pretty(links).unwrap_or_default());
+}
+
+fn server_base(app: &AppHandle) -> Result<String, String> {
+    let s = app.state::<AppState>().cfg.lock().unwrap().server_url.clone();
+    if s.is_empty() {
+        return Err("还没设置服务器地址".into());
+    }
+    Ok(s.trim_end_matches('/').to_string())
+}
+
+fn http_err(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(401, _) => "登录已失效，请重新登录".into(),
+        ureq::Error::Status(code, r) => {
+            let detail = r.into_json::<serde_json::Value>().ok().and_then(|v| v["detail"].as_str().map(String::from));
+            format!("服务器返回错误 {code}：{}", detail.unwrap_or_default())
+        }
+        other => format!("连不上服务器：{other}"),
+    }
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, String, u64)>, total: &mut u64) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("读不了文件夹 {}：{e}", dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            if !SKIP_DIRS.contains(&name.as_str()) {
+                collect_files(root, &path, out, total)?;
+            }
+        } else if meta.is_file() {
+            *total += meta.len();
+            if *total > MAX_UPLOAD_BYTES || out.len() >= MAX_UPLOAD_FILES {
+                return Err("文件夹太大了（最多 2 GB、2 万个文件），请选一个小一点的文件夹".into());
+            }
+            let rel = path.strip_prefix(root).unwrap_or(&path).components()
+                .map(|c| c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>().join("/");
+            out.push((path, rel, meta.len()));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct UploadResult {
+    link_id: String,
+    name: String,
+    abs: String,
+    files: usize,
+    bytes: u64,
+}
+
+/// 让用户选一个本机文件夹，整个上传到这个会话的工作区。取消选择时返回 None。
+#[tauri::command]
+async fn upload_local_folder(app: AppHandle, session_id: String, token: String) -> Result<Option<UploadResult>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let base = server_base(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(picked) = app.dialog().file().set_title("选择要交给 Claude 的文件夹").blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let root = picked.into_path().map_err(|e| e.to_string())?;
+        let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "本机文件".into());
+        let mut files = Vec::new();
+        let mut total = 0u64;
+        collect_files(&root, &root, &mut files, &mut total)?;
+        if files.is_empty() {
+            return Err("这个文件夹是空的".into());
+        }
+        let auth = format!("Bearer {token}");
+        let link: serde_json::Value = ureq::post(&format!("{base}/api/sessions/{session_id}/links"))
+            .set("Authorization", &auth)
+            .send_json(serde_json::json!({ "name": name }))
+            .map_err(http_err)?
+            .into_json()
+            .map_err(|e| e.to_string())?;
+        let link_id = link["id"].as_str().unwrap_or_default().to_string();
+        for (path, rel, _) in &files {
+            let f = File::open(path).map_err(|e| format!("打不开 {rel}：{e}"))?;
+            ureq::put(&format!("{base}/api/sessions/{session_id}/links/{link_id}/file?path={}", urlencoding::encode(rel)))
+                .set("Authorization", &auth)
+                .send(f)
+                .map_err(|e| format!("上传 {rel} 失败：{}", http_err(e)))?;
+        }
+        ureq::post(&format!("{base}/api/sessions/{session_id}/links/{link_id}/snapshot"))
+            .set("Authorization", &auth)
+            .call()
+            .map_err(http_err)?;
+        let mut links = load_links(&app);
+        links.insert(link_id.clone(), root.to_string_lossy().to_string());
+        save_links(&app, &links);
+        Ok(Some(UploadResult {
+            link_id,
+            name: link["name"].as_str().unwrap_or(&name).to_string(),
+            abs: link["abs"].as_str().unwrap_or_default().to_string(),
+            files: files.len(),
+            bytes: total,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 这个上传的文件夹在本机的位置（不是在这台电脑上添加的就返回 None）
+#[tauri::command]
+fn local_link_path(app: AppHandle, link_id: String) -> Option<String> {
+    load_links(&app).get(&link_id).cloned().filter(|p| Path::new(p).is_dir())
+}
+
+#[derive(Serialize)]
+struct SyncResult {
+    written: usize,
+    backups: usize,
+}
+
+/// 把 Claude 在工作区里新增、修改的文件写回本机原文件夹；被覆盖的文件先备份到 .projector备份/时间/ 下。
+#[tauri::command]
+async fn sync_back(app: AppHandle, session_id: String, link_id: String, token: String) -> Result<SyncResult, String> {
+    let base = server_base(&app)?;
+    let root = PathBuf::from(load_links(&app).get(&link_id).cloned().ok_or("这个文件夹不是在这台电脑上添加的")?);
+    if !root.is_dir() {
+        return Err(format!("本机文件夹不在了：{}", root.display()));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let auth = format!("Bearer {token}");
+        let changes: serde_json::Value = ureq::get(&format!("{base}/api/sessions/{session_id}/links/{link_id}/changes"))
+            .set("Authorization", &auth)
+            .call()
+            .map_err(http_err)?
+            .into_json()
+            .map_err(|e| e.to_string())?;
+        let stamp = {
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            format!("{secs}")
+        };
+        let (mut written, mut backups) = (0, 0);
+        let items = changes["added"].as_array().into_iter().flatten().chain(changes["modified"].as_array().into_iter().flatten());
+        for it in items {
+            let rel = it["rel"].as_str().unwrap_or_default();
+            let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+            if parts.is_empty() || parts.iter().any(|p| *p == ".." || p.contains(':') || p.contains('\\')) {
+                continue; // 不往选定文件夹外面写
+            }
+            let target = parts.iter().fold(root.clone(), |acc, p| acc.join(p));
+            if target.exists() {
+                let backup = parts.iter().fold(root.join(".projector备份").join(&stamp), |acc, p| acc.join(p));
+                if let Some(dir) = backup.parent() {
+                    fs::create_dir_all(dir).map_err(|e| format!("备份失败：{e}"))?;
+                }
+                fs::copy(&target, &backup).map_err(|e| format!("备份 {rel} 失败：{e}"))?;
+                backups += 1;
+            }
+            let url = format!("{base}/api/files/raw?path={}&download=1", urlencoding::encode(it["path"].as_str().unwrap_or_default()));
+            let resp = ureq::get(&url).set("Authorization", &auth).call().map_err(http_err)?;
+            if let Some(dir) = target.parent() {
+                fs::create_dir_all(dir).map_err(|e| format!("建文件夹失败：{e}"))?;
+            }
+            let tmp = target.with_extension("projector-tmp");
+            let mut f = File::create(&tmp).map_err(|e| format!("写 {rel} 失败（文件是不是正被打开？）：{e}"))?;
+            std::io::copy(&mut resp.into_reader(), &mut f).map_err(|e| format!("下载 {rel} 中断：{e}"))?;
+            drop(f);
+            fs::rename(&tmp, &target).map_err(|e| format!("写 {rel} 失败（文件是不是正被打开？）：{e}"))?;
+            written += 1;
+        }
+        ureq::post(&format!("{base}/api/sessions/{session_id}/links/{link_id}/snapshot"))
+            .set("Authorization", &auth)
+            .call()
+            .map_err(http_err)?;
+        Ok(SyncResult { written, backups })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------- 设置页：局域网里自动查找中心服务 ----------
+
+#[derive(Serialize)]
+struct FoundServer {
+    name: String,
+    url: String,
+    version: String,
+}
+
+#[tauri::command]
+async fn discover_servers() -> Result<Vec<FoundServer>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+        sock.set_broadcast(true).map_err(|e| e.to_string())?;
+        sock.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
+        let mut found: Vec<FoundServer> = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(1800);
+        let mut last_send = Instant::now() - Duration::from_secs(1);
+        let mut buf = [0u8; 1024];
+        while Instant::now() < deadline {
+            if last_send.elapsed() > Duration::from_millis(600) {
+                let _ = sock.send_to(b"PROJECTOR_DISCOVER", "255.255.255.255:8090");
+                let _ = sock.send_to(b"PROJECTOR_DISCOVER", "127.0.0.1:8090");
+                last_send = Instant::now();
+            }
+            let Ok((n, from)) = sock.recv_from(&mut buf) else { continue };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) else { continue };
+            if v["app"] != "projector" {
+                continue;
+            }
+            let port = v["port"].as_u64().unwrap_or(8080);
+            let ip = from.ip();
+            let host = if ip.is_loopback() { "localhost".to_string() } else { ip.to_string() };
+            let url = format!("http://{host}:{port}");
+            let name = v["name"].as_str().unwrap_or("台式机").to_string();
+            // 本机既收到广播又收到 127.0.0.1 的回复时，只留 localhost
+            if found.iter().any(|f| f.url == url || (f.name == name && (host == "localhost" || f.url.contains("localhost")))) {
+                if host == "localhost" {
+                    if let Some(f) = found.iter_mut().find(|f| f.name == name) {
+                        f.url = url;
+                    }
+                }
+                continue;
+            }
+            found.push(FoundServer { name, url, version: v["version"].as_str().unwrap_or_default().to_string() });
+        }
+        Ok(found)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---------- 设置页调用的命令 ----------
 
 #[tauri::command]
@@ -559,6 +811,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
         .manage(AppState {
             cfg: Mutex::new(Config::default()),
@@ -571,7 +824,7 @@ pub fn run() {
             quitting: AtomicBool::new(false),
             cap_seq: AtomicU32::new(0),
         })
-        .invoke_handler(tauri::generate_handler![get_config, save_config, open_remote_file])
+        .invoke_handler(tauri::generate_handler![get_config, save_config, open_remote_file, upload_local_folder, local_link_path, sync_back, discover_servers])
         .setup(|app| {
             let handle = app.handle().clone();
             let cfg = load_config(&handle);

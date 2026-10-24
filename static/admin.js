@@ -1,0 +1,246 @@
+// 管理后台：用户、所有人的聊天记录、技能库、待审核的技能。只有管理员能打开。
+"use strict";
+(() => {
+  let tab = "users";
+  let users = [];
+  const roleName = { admin: "管理员", user: "普通用户", device: "板子（语音）" };
+  const box = () => $("adminContent");
+
+  async function loadUsers() { users = await api("/api/admin/users"); return users; }
+  const userName = id => (users.find(u => u.id === id) || {}).display_name || ("#" + id);
+
+  async function refreshPending() {
+    const subs = await api("/api/skills/submissions").catch(() => []);
+    const n = subs.filter(s => s.status === "pending").length;
+    $("pendingCount").textContent = n ? `(${n})` : "";
+    return subs;
+  }
+
+  async function show(t) {
+    tab = t;
+    $("adminTabs").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+    box().innerHTML = '<div class="meta">读取中…</div>';
+    try {
+      await loadUsers();
+      if (t === "users") await renderUsers();
+      else if (t === "chats") await renderChats();
+      else if (t === "library") await renderLibrary();
+      else await renderReview();
+    } catch (e) { box().innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    refreshPending();
+  }
+
+  // ---------- 用户 ----------
+
+  async function renderUsers() {
+    box().innerHTML = `
+      <div class="card"><h4>新建账号</h4>
+        <div class="form" style="flex-direction:row;flex-wrap:wrap;align-items:center">
+          <input id="nuUser" placeholder="用户名（登录用）" style="width:160px">
+          <input id="nuName" placeholder="显示的名字" style="width:140px">
+          <input id="nuPwd" placeholder="初始密码（至少 6 位）" style="width:180px">
+          <button class="btn primary" id="nuBtn">创建</button>
+        </div>
+        <div class="err" id="nuErr"></div>
+        <div class="meta">同事那边只能登录、不能注册。把用户名和初始密码告诉同事，他们登录后可以自己改密码。</div>
+      </div>
+      <table class="grid"><tr><th>用户名</th><th>名字</th><th>角色</th><th title="允许打开“完全放行”">完全放行</th><th>会话</th><th>最近登录</th><th>状态</th><th></th></tr>
+      ${users.map(u => `<tr data-uid="${u.id}">
+        <td>${esc(u.username)}</td>
+        <td><a class="fpath" data-act="rename">${esc(u.display_name)}</a></td>
+        <td>${u.role === "device" ? roleName.device : `<select data-act="role"><option value="user" ${u.role === "user" ? "selected" : ""}>普通用户</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>管理员</option></select>`}</td>
+        <td>${u.role === "user" ? `<input type="checkbox" data-act="bypass" ${u.can_bypass ? "checked" : ""}>` : u.role === "admin" ? "✔" : "—"}</td>
+        <td>${u.sessions}</td>
+        <td class="meta">${u.last_seen ? ftime(u.last_seen) : "—"}</td>
+        <td>${u.role === "device" ? "" : `<label class="toggle"><input type="checkbox" data-act="disabled" ${u.disabled ? "checked" : ""}> 停用</label>`}</td>
+        <td style="white-space:nowrap">${u.role === "device" ? "" : `<button class="btn small" data-act="reset">重置密码</button>`}
+            ${u.role === "device" || u.id === me.id ? "" : `<button class="btn small danger" data-act="delete">删除</button>`}</td>
+      </tr>`).join("")}</table>`;
+    $("nuBtn").onclick = async () => {
+      try {
+        await post("/api/admin/users", { username: $("nuUser").value.trim(), display_name: $("nuName").value.trim(), password: $("nuPwd").value });
+        flash("已创建账号 " + $("nuUser").value.trim());
+        show("users");
+      } catch (e) { $("nuErr").textContent = e.message; }
+    };
+  }
+
+  async function patchUser(uid, body) {
+    try { await post("/api/admin/users/" + uid, body, "PATCH"); flash("已保存", 1500); }
+    catch (e) { alert(e.message); }
+    show("users");
+  }
+
+  box().addEventListener("change", e => {
+    const act = e.target.dataset.act, tr = e.target.closest("tr[data-uid]");
+    if (!act || !tr || tab !== "users") return;
+    const uid = +tr.dataset.uid;
+    if (act === "role") patchUser(uid, { role: e.target.value });
+    if (act === "bypass") patchUser(uid, { can_bypass: e.target.checked });
+    if (act === "disabled") patchUser(uid, { disabled: e.target.checked });
+  });
+
+  box().addEventListener("click", async e => {
+    const act = e.target.dataset.act, tr = e.target.closest("tr[data-uid]");
+    if (tab === "users" && act && tr) {
+      const uid = +tr.dataset.uid, u = users.find(x => x.id === uid);
+      if (act === "rename") {
+        const n = prompt("显示的名字", u.display_name);
+        if (n) patchUser(uid, { display_name: n });
+      } else if (act === "reset") {
+        const p = prompt(`给 ${u.display_name} 设一个新密码（至少 6 位），他会被要求重新登录：`);
+        if (p) patchUser(uid, { password: p });
+      } else if (act === "delete") {
+        if (confirm(`删除 ${u.display_name}？他的所有会话、聊天记录和工作区文件都会删除，不能恢复。\n只是不让他用的话，勾选“停用”就行。`)) {
+          try { await api("/api/admin/users/" + uid, { method: "DELETE" }); } catch (err) { alert(err.message); }
+          show("users");
+        }
+      }
+    }
+  });
+
+  // ---------- 聊天记录：按用户分组折叠 ----------
+
+  async function renderChats() {
+    const all = await api("/api/admin/sessions");
+    const groups = users.map(u => ({ u, list: all.filter(s => s.user_id === u.id) }));
+    box().innerHTML = '<p class="meta" style="margin-top:0">点开会话可以查看完整聊天记录和过程；别人的会话只能看，不能接着聊。</p>' +
+      groups.map(g => `<details class="grp" ${g.u.id === me.id ? "" : ""}>
+        <summary>${esc(g.u.display_name)} <span class="meta">（${esc(roleName[g.u.role] || g.u.role)} · ${g.list.length} 个会话${g.list.some(s => s.running) ? " · 有任务在进行" : ""}${g.list.some(s => s.pending) ? " · 有待确认" : ""}）</span></summary>
+        ${g.list.map(s => sessRow(s, true)).join("") || '<div class="meta" style="padding:0 12px 8px">没有会话</div>'}
+      </details>`).join("");
+    box().querySelectorAll(".sess").forEach(row => row.onclick = () => {
+      $("adminBox").classList.remove("show");
+      openSession(row.dataset.id);
+    });
+  }
+
+  let chatsTimer;
+  window.adminOnSession = () => {
+    if (tab !== "chats" || !$("adminBox").classList.contains("show")) return;
+    clearTimeout(chatsTimer);
+    chatsTimer = setTimeout(() => {
+      const open = [...box().querySelectorAll("details[open] summary")].map(s => s.textContent.split(" ")[0]);
+      renderChats().then(() => box().querySelectorAll("details").forEach(d => {
+        if (open.includes(d.querySelector("summary").textContent.split(" ")[0])) d.open = true;
+      }));
+    }, 800);
+  };
+
+  // ---------- 技能库 ----------
+
+  async function renderLibrary() {
+    const [lib, local] = await Promise.all([api("/api/admin/library"), api("/api/admin/local-skills")]);
+    const people = users.filter(u => u.role !== "admin");
+    const localNew = local.skills.filter(s => !s.in_library);
+    box().innerHTML = `
+      ${local.skills.length ? `<div class="card" style="border-color:var(--warn)">
+        <h4>⚠ 台式机本机的 skill（${esc(local.dir)}）</h4>
+        <div class="meta">这里的 skill 对<b>所有人</b>都生效，不受分配控制。建议导入技能库后，把这个文件夹里的 skill 移走。</div>
+        <details style="margin-top:4px"><summary class="meta" style="cursor:pointer">共 ${local.skills.length} 个，点开查看</summary>
+        ${local.skills.map(s => `<div style="margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(s.description)}"><b>${esc(s.name)}</b> ${s.in_library ? '<span class="status approved">已在库里</span>' : ""} <span class="meta">${esc(s.description)}</span></div>`).join("")}
+        </details>
+        ${localNew.length ? `<button class="btn small" id="importLocal" style="margin-top:6px">把 ${localNew.length} 个导入技能库</button>` : ""}
+      </div>` : ""}
+      ${lib.length ? "" : '<p class="meta">技能库是空的。同事提交的 skill 审核通过后会出现在这里。</p>'}
+      ${lib.map(s => `<div class="card" data-skill="${esc(s.name)}">
+        <h4>${esc(s.name)}</h4>
+        <div class="meta">${esc(s.description)}</div>
+        <div class="meta">提交人：${esc(s.submitter || "—")} · 更新：${ftime(s.updated)}</div>
+        <div class="users-pick">
+          <label><input type="checkbox" data-everyone ${s.everyone ? "checked" : ""}> <b>所有人可用</b></label>
+          ${people.map(u => `<label><input type="checkbox" data-u="${u.id}" ${s.users.includes(u.id) ? "checked" : ""} ${s.everyone ? "disabled" : ""}> ${esc(u.display_name)}</label>`).join("")}
+          <span class="meta">（管理员默认都能用）</span>
+        </div>
+        <div style="margin-top:6px;display:flex;gap:6px">
+          <button class="btn small" data-view>查看文件</button>
+          <button class="btn small danger" data-remove>从库里删除</button>
+        </div>
+      </div>`).join("")}`;
+    $("importLocal") && ($("importLocal").onclick = async () => {
+      const r = await post("/api/admin/local-skills/import", { names: localNew.map(s => s.name) });
+      flash(`已导入 ${r.imported.length} 个，记得分配给需要的人`);
+      show("library");
+    });
+    box().querySelectorAll(".card[data-skill]").forEach(card => {
+      const name = card.dataset.skill;
+      const save = async () => {
+        const everyone = card.querySelector("[data-everyone]").checked;
+        card.querySelectorAll("[data-u]").forEach(c => c.disabled = everyone);
+        const ids = [...card.querySelectorAll("[data-u]:checked")].map(c => +c.dataset.u);
+        try { await post(`/api/admin/library/${name}/access`, { everyone, users: ids }, "PUT"); flash("已保存分配", 1500); }
+        catch (e) { alert(e.message); }
+      };
+      card.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = save);
+      card.querySelector("[data-view]").onclick = async () => {
+        const d = await api(`/api/admin/library/${name}/files`);
+        fileViewer(`技能 ${name} 的文件`, d.files);
+      };
+      card.querySelector("[data-remove]").onclick = async () => {
+        if (!confirm(`从技能库删除 ${name}？所有人都不能再用它。`)) return;
+        await api(`/api/admin/library/${name}`, { method: "DELETE" });
+        show("library");
+      };
+    });
+  }
+
+  // 审核和查看用：左边文件列表，右边内容
+  function fileViewer(title, files, buttons = [], extraHtml = "") {
+    const body = dialog(title, `${extraHtml}<div class="filev"><div class="list">${files.map((f, i) =>
+      `<div data-i="${i}">${/\.(py|sh|bat|cmd|ps1|js|ts|exe|dll)$/i.test(f.path) ? "⚙ " : ""}${esc(f.path)} <span class="meta">${fsize(f.size)}</span></div>`).join("")}</div>
+      <pre id="fvPre">选左边的文件查看内容</pre></div>`, buttons, true);
+    const pick = i => {
+      const f = files[i];
+      body.querySelectorAll(".list div").forEach(d => d.classList.toggle("on", +d.dataset.i === i));
+      body.querySelector("#fvPre").textContent = f.text == null ? `（二进制文件，${fsize(f.size)}，不能显示）` : f.text + (f.truncated ? "\n……（太长，已截断）" : "");
+    };
+    body.querySelector(".list").onclick = e => { const d = e.target.closest("[data-i]"); if (d) pick(+d.dataset.i); };
+    const first = files.findIndex(f => f.path === "SKILL.md");
+    if (files.length) pick(first >= 0 ? first : 0);
+    return body;
+  }
+
+  // ---------- 待审核 ----------
+
+  async function renderReview() {
+    const subs = await refreshPending();
+    const st = { pending: "待审核", approved: "已入库", rejected: "未通过" };
+    const pending = subs.filter(s => s.status === "pending"), done = subs.filter(s => s.status !== "pending");
+    const card = s => `<div class="card"><h4>${esc(s.name)} <span class="status ${s.status}">${st[s.status]}</span></h4>
+      <div class="meta">${esc(s.description)}</div>
+      <div class="meta">提交人：${esc(s.submitter || "—")} · ${ftime(s.created)}${s.note ? " · 备注：" + esc(s.note) : ""}</div>
+      <div style="margin-top:6px;display:flex;gap:6px">
+        <button class="btn small ${s.status === "pending" ? "primary" : ""}" data-review="${s.id}">${s.status === "pending" ? "审核" : "查看"}</button>
+        <button class="btn small danger" data-delsub="${s.id}">删除</button></div></div>`;
+    box().innerHTML = `<p class="meta" style="margin-top:0">skill 里的脚本会在台式机上以完整权限运行，审核时请把脚本文件（⚙ 标记的）都看一遍。</p>
+      <h4>待审核（${pending.length}）</h4>${pending.map(card).join("") || '<p class="meta">没有待审核的提交。</p>'}
+      <h4>历史</h4>${done.map(card).join("") || '<p class="meta">没有。</p>'}`;
+    box().querySelectorAll("[data-review]").forEach(b => b.onclick = () => review(b.dataset.review));
+    box().querySelectorAll("[data-delsub]").forEach(b => b.onclick = async () => {
+      if (!confirm("删除这个提交记录？（已入库的技能不受影响）")) return;
+      await api("/api/skills/submissions/" + b.dataset.delsub, { method: "DELETE" });
+      show("review");
+    });
+  }
+
+  async function review(id) {
+    const d = await api(`/api/skills/submissions/${id}/files`);
+    const s = d.submission;
+    const pending = s.status === "pending";
+    const decide = approve => async () => {
+      const note = $("rvNote").value.trim();
+      await post(`/api/skills/submissions/${id}/review`, { approve, note });
+      flash(approve ? `已入库：${s.name}。到“技能库”里分配给需要的人` : "已退回");
+      show(approve ? "library" : "review");
+    };
+    fileViewer(`审核技能：${s.name}`, d.files,
+      pending ? [{ label: "退回", danger: true, onClick: decide(false) }, { label: "通过并入库", primary: true, onClick: decide(true) }] : [],
+      `<div class="meta">提交人：${esc(s.submitter || userName(s.submitted_by))} · ${d.files.length} 个文件
+        ${d.updates_existing ? ' · <b style="color:var(--warn)">会覆盖技能库里同名的技能</b>' : ""}</div>
+       <div class="meta" style="margin-bottom:8px">${esc(s.description)}</div>
+       ${pending ? '<input id="rvNote" placeholder="给提交人的备注（可选）" style="width:100%;margin-bottom:8px;padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg)">' : ""}`);
+  }
+
+  $("adminTabs").onclick = e => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); };
+  $("adminLink").onclick = () => { $("adminBox").classList.add("show"); $("side").classList.remove("open"); show(tab); };
+})();
