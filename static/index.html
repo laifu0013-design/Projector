@@ -18,7 +18,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script src="/static/ui.js?v=0.5.1"></script>
+<script src="/static/ui.js?v=0.5.2"></script>
 <style>
 /* ============ 主题：暖纸色（浅色）/ 台灯夜色（深色） ============ */
 :root {
@@ -517,6 +517,45 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
 .status.rejected { background: var(--rose-soft); color: var(--rose); }
 .empty-note { color: var(--muted); font-size: 14px; padding: 6px 2px; }
 
+/* ============ Claude 提问卡片 ============ */
+.askdock { max-width: 780px; margin: 0 auto 10px; background: var(--raised); border: 1px solid var(--line2); border-radius: 22px; box-shadow: var(--shadow-lg); overflow: hidden; animation: askin .5s var(--spring); position: relative; }
+@keyframes askin { from { opacity: 0; transform: translateY(24px) scale(.97); } }
+.askdock::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; background: linear-gradient(90deg, var(--amber), var(--accent), var(--amber)); background-size: 200% 100%; animation: shimmer 2.4s linear infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+.ask-top { display: flex; align-items: center; gap: 10px; padding: 14px 18px 4px; }
+.ask-top .t { font: italic 18px var(--f-display); }
+.ask-top .t b { font: 600 13px var(--f-body); font-style: normal; color: var(--muted); margin-left: 6px; }
+.ask-steps { margin-left: auto; display: flex; gap: 6px; }
+.ask-steps button { font-size: 12px; padding: 2px 10px; border-radius: 20px; background: var(--code); color: var(--muted); transition: background .2s, color .2s; display: inline-flex; gap: 5px; align-items: center; }
+.ask-steps button.on { background: var(--ink); color: var(--bg); }
+.ask-steps button.done { color: var(--sage); }
+.ask-body { padding: 6px 18px 4px; animation: fade .3s; }
+.ask-q { font-size: 16.5px; font-weight: 600; margin: 4px 0 12px; line-height: 1.45; }
+.ask-q small { display: block; font-size: 12px; font-weight: 500; color: var(--muted); margin-top: 2px; }
+.ask-opts { display: flex; flex-direction: column; gap: 8px; }
+.ask-opt { display: flex; align-items: flex-start; gap: 12px; padding: 11px 14px; border-radius: 14px; border: 1.5px solid var(--line2); cursor: pointer; text-align: left; width: 100%; transition: border-color .2s, background .2s, transform .25s var(--spring); animation: rise .4s var(--ease) both; }
+.ask-opt:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line2)); transform: translateX(3px); }
+.ask-opt.on { border-color: var(--accent); background: var(--accent-soft); }
+.ask-opt .k { width: 24px; height: 24px; border-radius: 8px; flex-shrink: 0; display: grid; place-items: center; font: 600 12px var(--f-mono); background: var(--code); color: var(--muted); transition: background .2s, color .2s, transform .3s var(--spring); }
+.ask-opt.on .k { background: var(--accent); color: var(--accent-ink); transform: scale(1.1); }
+.ask-opt.multi .k { border-radius: 6px; }
+.ask-opt b { display: block; font-size: 14.5px; font-weight: 600; }
+.ask-opt span.d { display: block; font-size: 12.5px; color: var(--muted); margin-top: 1px; }
+.ask-opt.rec b::after { content: "推荐"; font-size: 10.5px; font-weight: 700; color: var(--accent2); background: var(--accent-soft); border-radius: 5px; padding: 0 5px; margin-left: 8px; vertical-align: 1px; }
+.ask-other { display: flex; align-items: center; gap: 12px; padding: 7px 14px; border-radius: 14px; border: 1.5px dashed var(--line2); transition: border-color .2s, background .2s; }
+.ask-other.on { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
+.ask-other input { flex: 1; border: 0; outline: none; background: none; font-size: 14px; padding: 4px 0; }
+.ask-note { margin-top: 10px; }
+.ask-note input { width: 100%; border: 0; border-bottom: 1px solid var(--line2); outline: none; background: none; font-size: 13px; padding: 6px 2px; color: var(--ink2); }
+.ask-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px 14px; }
+.ask-foot .hint { font-size: 11.5px; color: var(--faint); margin-right: auto; }
+.msg.qa { display: flex; justify-content: center; }
+.qa-card { width: min(560px, 100%); border: 1px solid var(--line); background: var(--surface); border-radius: 16px; padding: 12px 16px; font-size: 13.5px; }
+.qa-card .qa-h { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.qa-card .qa-q { color: var(--ink2); margin-top: 6px; }
+.qa-card .qa-a { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+.qa-card .qa-a .chip { background: var(--accent-soft); border-color: transparent; color: var(--accent2); font-weight: 600; }
+
 /* ============ 技能详情、版本记录 ============ */
 .sk-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
 .sk-head .big { width: 52px; height: 52px; border-radius: 16px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex-shrink: 0; }
@@ -643,6 +682,7 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
     <div class="banner links" id="linksBar" hidden></div>
     <div id="messages"><div class="inner" id="list"></div></div>
     <div class="composer" id="composer">
+      <div class="askdock" id="askDock" hidden></div>
       <div class="cbox" id="cbox">
         <div class="chips" id="composerChips"></div>
         <textarea id="input" rows="1" placeholder="让 Claude 干点活……"></textarea>
@@ -754,7 +794,7 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
   </section>
 </div></div>
 
-<script src="/static/app.js?v=0.5.1"></script>
-<script src="/static/admin.js?v=0.5.1"></script>
+<script src="/static/app.js?v=0.5.2"></script>
+<script src="/static/admin.js?v=0.5.2"></script>
 </body>
 </html>

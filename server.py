@@ -45,7 +45,8 @@ SAFE_BASH = [
 ]
 EDIT_TOOLS = ["Edit", "Write"]
 # 技能工具：提交的技能要管理员审核才生效，所以自动放行
-SKILL_TOOLS = ["mcp__center__skill_list", "mcp__center__skill_checkout", "mcp__center__skill_submit"]
+SKILL_TOOLS = ["mcp__center__skill_list", "mcp__center__skill_checkout", "mcp__center__skill_submit",
+               "mcp__center__ask_user"]  # ask_user：弹出选项让用户点选
 DEFAULT_BASH_ALLOW = ["python", "py", "pip", "unzip", "tar"]  # 严格档下额外自动放行的命令
 # 标准档下仍要确认的危险命令（删除、移动、格式化、改系统、强制推送等）
 DEFAULT_ASK_CMDS = ["rm", "rmdir", "del", "erase", "rd", "mv", "move", "Remove-Item", "ri", "Move-Item",
@@ -76,6 +77,9 @@ WEB_HINT = (
     "删除、移动文件和执行命令会弹窗让用户确认；被拒绝时不要换个方式重试同样的操作，先问用户。"
     "用户上传的本机文件在“工作区”里（消息里会给出完整路径），处理结果如果要还给用户，直接改那些文件或在同一文件夹里新建，"
     "用户可以一键同步回自己的电脑。不要访问其他用户的工作区。"
+    "需要用户在几个方案里做选择、或确认关键信息时，调用 ask_user 弹出选项让用户点选："
+    "一次最多 4 个问题，每题 2~4 个选项，推荐的选项放第一个并在 label 末尾加“（推荐）”；"
+    "不要在回答里列出选项等用户打字回复，也不要为显而易见的事情提问。"
     "用户想新建或修改团队技能（skill）时：先用 skill_checkout 取出（新建时 name 留空拿到草稿文件夹），"
     "在工作区里改好，再用 skill_submit 提交并写清更新说明；提交后要管理员审核才生效，不要直接改技能库或插件目录。"
     "这台电脑是 Windows，命令通过 Git Bash 执行：python 不能用时试 py；没有 unzip 时用 tar -xf 文件.zip 或 "
@@ -97,7 +101,7 @@ app.include_router(skills_api.router)
 
 def session_view(s: dict) -> dict:
     owner = get_user(s.get("user_id")) or {}
-    return {**s, "running": s["id"] in RUNS, "pending": len(pending_for(s["id"])),
+    return {**s, "running": s["id"] in RUNS, "pending": len(pending_for(s["id"])) + len(questions_for(s["id"])),
             "owner": owner.get("display_name", ""), "owner_avatar": avatar_of(owner) if owner else "orange",
             "work_dir": s.get("work_dir") or str(FILE_ROOT)}
 
@@ -149,6 +153,13 @@ def broadcast(event: dict, owner_id) -> None:
 # ---------- 权限确认 ----------
 
 APPROVALS: dict[str, dict] = {}
+
+
+QUESTIONS: dict[str, dict] = {}
+
+
+def questions_for(sid: str) -> list[dict]:
+    return [q for q in QUESTIONS.values() if q["session_id"] == sid]
 
 
 def pending_for(sid: str) -> list[dict]:
@@ -225,7 +236,7 @@ def build_command(claude_bin: str, sess: dict, owner: dict, extra_dirs: list[Pat
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         # 提示词写进文件再传：Windows 上 claude 常是 .cmd 包装，中文参数经过 cmd 容易乱码
         "--append-system-prompt-file", str(_hint_file(sess, owner)),
-        "--disallowedTools", *_deny_rules(owner),
+        "--disallowedTools", "AskUserQuestion", *_deny_rules(owner),
     ]
     for d in dict.fromkeys(str(p) for p in extra_dirs):
         cmd += ["--add-dir", d]
@@ -438,7 +449,7 @@ async def _drive(run: Run, prompt: str, cmd: list[str], cwd: str) -> None:
     if "warn_perm" in run.warnings:
         add_message(run.sid, "event", "⚠ 这一轮里权限确认通道出了故障，需要确认的操作没有执行。重发一次通常就好；"
                                       f"反复出现请把 data/logs/claude_{run.sid}.log 发给管理员。")
-    for a in pending_for(run.sid):
+    for a in pending_for(run.sid) + questions_for(run.sid):
         if not a["future"].done():
             a["future"].set_result((False, "任务已结束"))
     del RUNS[run.sid]
@@ -792,6 +803,7 @@ def read_session(sid: str, user: dict = Depends(current_user)):
         "messages": msgs,
         "live": live,
         "approvals": [approval_public(a) for a in pending_for(sid)],
+        "questions": [approval_public(q) for q in questions_for(sid)],
     }
 
 
@@ -855,7 +867,7 @@ def stop_session(sid: str, user: dict = Depends(current_user)):
     run = RUNS.get(sid)
     if run and run.proc:
         run.stopped = True
-        for a in pending_for(sid):
+        for a in pending_for(sid) + questions_for(sid):
             if not a["future"].done():
                 a["future"].set_result((False, "用户停止了任务"))
         _kill_tree(run.proc)
@@ -927,6 +939,96 @@ async def request_approval(body: ApprovalRequest, _: dict = Depends(require_inte
         broadcast({"type": "approval_done", "id": aid, "session_id": body.session_id}, run.owner_id)
         push_session(body.session_id)
     return {"allow": allow, "message": message}
+
+
+# ---------- Claude 提问（approval_mcp.py 的 ask_user）：弹出选项，等用户点选 ----------
+
+class QuestionItem(BaseModel):
+    question: str
+    header: str = ""
+    options: list[dict] = []
+    multi_select: bool = False
+
+
+class QuestionRequest(BaseModel):
+    session_id: str
+    questions: list[QuestionItem]
+
+
+class QuestionAnswer(BaseModel):
+    answers: list[dict] = []   # [{selected: [label...], other: "", note: ""}]，和问题一一对应
+    skipped: bool = False
+
+
+def _qa_text(questions: list[dict], answers: list[dict]) -> str:
+    lines = []
+    for i, q in enumerate(questions):
+        a = answers[i] if i < len(answers) else {}
+        picked = list(a.get("selected") or [])
+        if (a.get("other") or "").strip():
+            picked.append("其他：" + a["other"].strip())
+        line = f"{i + 1}. {q['question']} → {'、'.join(picked) or '（没选）'}"
+        if (a.get("note") or "").strip():
+            line += f"（备注：{a['note'].strip()}）"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@app.post("/api/questions")
+async def ask_question(body: QuestionRequest, _: dict = Depends(require_internal)):
+    run = RUNS.get(body.session_id)
+    sess = db("SELECT source FROM sessions WHERE id=?", (body.session_id,), one=True)
+    if not run:
+        return {"text": "任务已结束。"}
+    if sess and sess["source"] == "voice":
+        return {"text": "这是语音会话，不能弹出选项。请把问题和选项简短地写进回答里，让用户口头回复。"}
+    questions = []
+    for q in body.questions[:4]:
+        opts = [{"label": str(o.get("label", "")).strip()[:80], "description": str(o.get("description", "")).strip()[:200]}
+                for o in q.options[:6] if str(o.get("label", "")).strip()]
+        if q.question.strip() and opts:
+            questions.append({"question": q.question.strip()[:300], "header": q.header.strip()[:16], "options": opts,
+                              "multi_select": q.multi_select})
+    if not questions:
+        return {"text": "问题格式不对：每个问题要有 question 和至少一个带 label 的选项。"}
+    qid = uuid.uuid4().hex[:8]
+    future = asyncio.get_running_loop().create_future()
+    item = QUESTIONS[qid] = {"id": qid, "session_id": body.session_id, "questions": questions,
+                             "created": time.time(), "future": future}
+    broadcast({"type": "question", "question": approval_public(item)}, run.owner_id)
+    push_session(body.session_id)
+    try:
+        ok, payload = await asyncio.wait_for(future, APPROVAL_TIMEOUT)
+    except asyncio.TimeoutError:
+        ok, payload = False, "用户 30 分钟内没有回答。"
+        add_message(body.session_id, "event", "⌛ 问题超时没有回答", {"qa": {"questions": questions, "answers": [], "skipped": True}})
+    finally:
+        QUESTIONS.pop(qid, None)
+        broadcast({"type": "question_done", "id": qid, "session_id": body.session_id}, run.owner_id)
+        push_session(body.session_id)
+    if not ok:
+        return {"text": payload if isinstance(payload, str) else "用户没有回答。"}
+    if payload.get("skipped"):
+        return {"text": "用户跳过了这些问题，没有选择。请按你认为最合理的方式继续，并在最后说明你做了什么假设。"}
+    return {"text": "用户的回答：\n" + _qa_text(questions, payload["answers"])}
+
+
+@app.post("/api/questions/{qid}")
+def answer_question(qid: str, body: QuestionAnswer, user: dict = Depends(current_user)):
+    q = QUESTIONS.get(qid)
+    if not q:
+        raise HTTPException(404, "这个问题已经回答过或已过期")
+    session_for(q["session_id"], user)  # 只有会话主人和管理员能回答
+    answers = [{"selected": [str(x)[:80] for x in (a.get("selected") or [])][:6],
+                "other": str(a.get("other") or "")[:500], "note": str(a.get("note") or "")[:500]} for a in body.answers[:4]]
+    if not body.skipped and any(not (a["selected"] or a["other"].strip()) for a in answers[:len(q["questions"])]):
+        raise HTTPException(400, "每个问题都要选一个答案（或者填“其他”）")
+    if not q["future"].done():
+        q["future"].set_result((True, {"answers": answers, "skipped": body.skipped}))
+    who = user["display_name"]
+    add_message(q["session_id"], "event", f"{'跳过了' if body.skipped else '回答了'} Claude 的问题（{who}）",
+                {"qa": {"questions": q["questions"], "answers": answers, "skipped": body.skipped, "by": who}})
+    return {"ok": True}
 
 
 @app.post("/api/approvals/{aid}")

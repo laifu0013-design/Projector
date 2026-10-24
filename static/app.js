@@ -18,6 +18,8 @@ let currentSess = null;      // 当前会话对象（可能是别人的，管理
 let messages = [];
 let live = null;             // 正在进行的回复 {text, tools}
 let approvals = [];
+let questions = [];          // Claude 正在等你回答的问题（ask_user）
+const askState = {};         // 每组问题的作答状态：{step, ans: [{selected: [], other, note}]}
 let links = [];              // 当前会话上传的本机文件夹
 let es = null;
 const composer = { refs: [], skill: "", workDir: "" };  // workDir：新会话还没创建时先记着
@@ -335,7 +337,9 @@ function renderTop() {
   $("wdBtn").disabled = !mine || !!(s && s.claude_session);
   $("ownerTag").innerHTML = s && !mine ? `${avatarEl(s.owner_avatar, 18)} ${esc(s.owner)}` : (s && s.bypass ? '<span class="tag warn">完全放行中</span>' : "");
   $("ownerTag").style.cssText = "display:inline-flex;align-items:center;gap:6px";
-  $("composer").hidden = !mine;
+  $("composer").hidden = !mine && !questions.length;
+  $("cbox").hidden = questions.length > 0 || !mine;
+  $("cfoot").hidden = questions.length > 0 || !mine;
   $("otherBanner").hidden = mine;
   if (!mine) $("otherBanner").innerHTML = `${icon("eye", 16)}你在查看 <b>${esc(s.owner)}</b> 的会话${s.source === "voice" ? "（板子语音）" : ""}，只能看。待确认的操作可以代为处理。`;
   $("cfoot").textContent = s && s.bypass ? "完全放行已打开：所有操作都会直接执行，不再询问" : "Claude 在台式机上干活，重要的改动请再核对一遍";
@@ -425,6 +429,13 @@ function renderMessages(force = false) {
       const tag = meta.bypass ? " · 完全放行" : "";
       return `<div class="msg me${isNew}"><div class="me-col">${chipsHtml(meta)}<div class="bubble">${esc(m.content)}</div><div class="meta">${esc(meta.author || "")} · ${hm(m.created)}${tag}</div></div>${avatarEl(ownerAva, 32)}</div>`;
     }
+    if (m.role === "event" && meta.qa) {
+      const qa = meta.qa;
+      return `<div class="msg qa${isNew}"><div class="qa-card"><div class="qa-h">${icon("chat", 13)}${esc(m.content)} · ${hm(m.created)}</div>
+        ${qa.questions.map((q, i) => { const a = (qa.answers || [])[i] || {}; const picks = [...(a.selected || []), ...(a.other ? ["其他：" + a.other] : [])];
+          return `<div class="qa-q">${esc(q.question)}</div><div class="qa-a">${picks.length ? picks.map(p => `<span class="chip">${esc(p)}</span>`).join("") : '<span class="muted">（没选）</span>'}${a.note ? `<span class="muted" style="font-size:12.5px">备注：${esc(a.note)}</span>` : ""}</div>`; }).join("")}
+      </div></div>`;
+    }
     if (m.role === "event") {
       const kind = m.content.startsWith("✔") ? "ok" : (m.content.startsWith("✘") || m.content.startsWith("⌛")) ? "no" : "";
       return `<div class="msg evt ${kind}${isNew}"><span>${icon(kind === "ok" ? "check" : kind === "no" ? "x" : "sparkle", 13)}${esc(m.content.replace(/^[✔✘⌛]\s*/, ""))}</span></div>`;
@@ -434,7 +445,7 @@ function renderMessages(force = false) {
     return `<div class="msg ai${isNew}">${aiHead(m.created)}<div class="ai-body">${stepsDone(meta.tools)}${body}${info ? `<div class="meta" style="margin-top:8px">${info}</div>` : ""}</div></div>`;
   }).join("");
   if (live) {
-    const waiting = approvals.length > 0;
+    const waiting = approvals.length > 0 || questions.length > 0;
     html += `<div class="msg ai${seen.has("live") ? "" : " new"}">${aiHead(null, waiting ? "wait" : "busy")}<div class="ai-body">${stepsLive(live.tools, waiting)}<div class="md ${waiting ? "" : "typing"}">${md(live.text)}</div></div></div>`;
   }
   html += approvals.map(a => `
@@ -496,14 +507,14 @@ async function openSession(id) {
   $("side").classList.remove("open");
   seen.clear(); liveSteps = 0;
   if (!id) {
-    currentSess = null; messages = []; live = null; approvals = []; links = [];
-    renderSessions(); renderMessages(true); $("input").focus(); return;
+    currentSess = null; messages = []; live = null; approvals = []; links = []; questions = [];
+    renderSessions(); renderMessages(true); renderAsk(); $("input").focus(); return;
   }
   const data = await api("/api/sessions/" + id);
   if (current !== id) return;
-  currentSess = data.session; messages = data.messages; live = data.live; approvals = data.approvals;
+  currentSess = data.session; messages = data.messages; live = data.live; approvals = data.approvals; questions = data.questions || [];
   links = await api(`/api/sessions/${id}/links`).catch(() => []);
-  renderSessions(); renderMessages(true);
+  renderSessions(); renderMessages(true); renderAsk();
   $("messages").style.scrollBehavior = "auto";
   $("messages").scrollTop = $("messages").scrollHeight;
   $("messages").style.scrollBehavior = "";
@@ -552,6 +563,16 @@ function connect() {
     }
     const sid = ev.session_id || (ev.approval && ev.approval.session_id);
     if (ev.type === "approval" && sessions.some(s => s.id === sid)) notify("需要确认：" + ev.approval.summary);
+    const qsid = ev.question && ev.question.session_id;
+    if (ev.type === "question" && sessions.some(s => s.id === qsid)) notify("Claude 想问你：" + ev.question.questions[0].question);
+    if (ev.type === "question") {
+      if (qsid === current && !questions.some(q => q.id === ev.question.id)) { questions.push(ev.question); renderAsk(); renderMessages(); }
+      return;
+    }
+    if (ev.type === "question_done") {
+      if (ev.session_id === current) { questions = questions.filter(q => q.id !== ev.id); renderAsk(); renderMessages(); }
+      return;
+    }
     if (sid !== current) return;
     if (ev.type === "message") {
       if (!messages.some(m => m.id === ev.message.id)) messages.push(ev.message);
@@ -607,6 +628,108 @@ async function showSteps() {
 }
 
 function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 260) + "px"; }
+
+// ---------- Claude 提问卡片（像 Claude 桌面端那样弹出选项） ----------
+
+function askOf(q) {
+  return askState[q.id] || (askState[q.id] = { step: 0, ans: q.questions.map(() => ({ selected: [], other: "", note: "" })) });
+}
+const answered = a => a.selected.length > 0 || a.other.trim().length > 0;
+
+function renderAsk() {
+  const dock = $("askDock");
+  const q = questions[0];
+  renderTop();
+  if (!q) { dock.hidden = true; dock.innerHTML = ""; return; }
+  const st = askOf(q), qi = st.step, item = q.questions[qi], a = st.ans[qi];
+  const multi = !!item.multi_select, last = qi === q.questions.length - 1;
+  const othersel = a.other.trim().length > 0;
+  dock.hidden = false;
+  dock.innerHTML = `
+    <div class="ask-top">${orb(26, "wait")}<span class="t">Claude 想问你<b>${q.questions.length > 1 ? `${qi + 1} / ${q.questions.length}` : ""}</b></span>
+      ${q.questions.length > 1 ? `<span class="ask-steps">${q.questions.map((x, i) => `<button data-step="${i}" class="${i === qi ? "on" : ""} ${answered(st.ans[i]) ? "done" : ""}">${answered(st.ans[i]) && i !== qi ? icon("check", 11) : ""}${esc(x.header || "问题 " + (i + 1))}</button>`).join("")}</span>` : ""}
+    </div>
+    <div class="ask-body" data-qi="${qi}">
+      <div class="ask-q">${esc(item.question)}${multi ? "<small>可以多选</small>" : ""}</div>
+      <div class="ask-opts">
+        ${item.options.map((o, i) => `<button class="ask-opt ${multi ? "multi" : ""} ${a.selected.includes(o.label) ? "on" : ""} ${/（推荐）$|\(推荐\)$/.test(o.label) ? "rec" : ""}" data-opt="${i}" style="animation-delay:${i * 40}ms">
+          <span class="k">${a.selected.includes(o.label) && multi ? icon("check", 13) : i + 1}</span>
+          <span><b>${esc(o.label.replace(/（推荐）$|\(推荐\)$/, ""))}</b>${o.description ? `<span class="d">${esc(o.description)}</span>` : ""}</span></button>`).join("")}
+        <label class="ask-other ${othersel ? "on" : ""}"><span class="k" style="width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:var(--code);color:var(--muted)">${icon("edit", 12)}</span>
+          <input id="askOther" placeholder="其他：自己写一个答案…" value="${esc(a.other)}"></label>
+      </div>
+      <div class="ask-note"><input id="askNote" placeholder="补充说明（可选），比如具体要求、注意事项" value="${esc(a.note)}"></div>
+    </div>
+    <div class="ask-foot">
+      <span class="hint">按 1~${item.options.length} 选择 · 回车${last ? "提交" : "下一题"}</span>
+      <button class="btn ghost small" data-skip>跳过，让 Claude 自己决定</button>
+      ${qi > 0 ? `<button class="btn small" data-prev>${icon("chevL", 14)}上一题</button>` : ""}
+      ${last ? `<button class="btn primary" data-submit ${st.ans.every(answered) ? "" : "disabled"}>${icon("check", 15)}提交</button>`
+             : `<button class="btn primary" data-next ${answered(a) ? "" : "disabled"}>下一题${icon("chevR", 14)}</button>`}
+    </div>`;
+  const other = dock.querySelector("#askOther"), note = dock.querySelector("#askNote");
+  other.oninput = () => {
+    a.other = other.value;
+    if (a.other.trim() && !multi) { a.selected = []; dock.querySelectorAll(".ask-opt").forEach(b => b.classList.remove("on")); }
+    other.closest(".ask-other").classList.toggle("on", !!a.other.trim());
+    const btn = dock.querySelector("[data-submit],[data-next]");
+    if (btn) btn.disabled = btn.dataset.submit !== undefined ? !st.ans.every(answered) : !answered(a);
+  };
+  note.oninput = () => { a.note = note.value; };
+  if (!$("filesBox").classList.contains("show") && !$("dlgBox").classList.contains("show")) dock.focus?.();
+}
+
+async function submitAsk(skipped = false) {
+  const q = questions[0];
+  if (!q) return;
+  const st = askOf(q);
+  const dock = $("askDock");
+  dock.querySelectorAll("button").forEach(b => b.disabled = true);
+  try {
+    await post("/api/questions/" + q.id, { skipped, answers: st.ans.map(a => ({ selected: a.selected, other: a.other.trim(), note: a.note.trim() })) });
+    dock.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(16px) scale(.97)" }], { duration: 260, fill: "forwards" });
+    questions = questions.filter(x => x.id !== q.id);
+    delete askState[q.id];
+    setTimeout(() => { renderAsk(); renderMessages(); }, 240);
+    toast(skipped ? "已跳过，Claude 会自己判断" : "已回答，Claude 继续干活", "ok", 2200);
+  } catch (e) { toast(e.message, "err"); renderAsk(); }
+}
+
+function pickOption(i) {
+  const q = questions[0]; if (!q) return;
+  const st = askOf(q), item = q.questions[st.step], a = st.ans[st.step], o = item.options[i];
+  if (!o) return;
+  if (item.multi_select) {
+    a.selected = a.selected.includes(o.label) ? a.selected.filter(x => x !== o.label) : [...a.selected, o.label];
+    renderAsk();
+  } else {
+    a.selected = [o.label]; a.other = "";
+    renderAsk();
+    if (st.step < q.questions.length - 1) setTimeout(() => { if (questions[0] === q) { st.step++; renderAsk(); } }, 260);  // 单选自动下一题
+  }
+}
+
+$("askDock").addEventListener("click", e => {
+  const q = questions[0]; if (!q) return;
+  const st = askOf(q);
+  const opt = e.target.closest("[data-opt]"), step = e.target.closest("[data-step]");
+  if (opt) return pickOption(+opt.dataset.opt);
+  if (step) { st.step = +step.dataset.step; return renderAsk(); }
+  if (e.target.closest("[data-next]")) { st.step++; return renderAsk(); }
+  if (e.target.closest("[data-prev]")) { st.step--; return renderAsk(); }
+  if (e.target.closest("[data-submit]")) return submitAsk(false);
+  if (e.target.closest("[data-skip]")) { if (confirm("跳过这些问题？Claude 会按它认为最合理的方式继续。")) submitAsk(true); }
+});
+document.addEventListener("keydown", e => {
+  if ($("askDock").hidden || !questions.length) return;
+  if (document.querySelector(".overlay.show")) return;
+  const typing = e.target.closest && e.target.closest("input, textarea");
+  if (!typing && /^[1-9]$/.test(e.key)) { e.preventDefault(); return pickOption(+e.key - 1); }
+  if (e.key === "Enter" && !e.isComposing && (!typing || e.target.id === "askOther" || e.target.id === "askNote")) {
+    const btn = $("askDock").querySelector("[data-submit]:not(:disabled),[data-next]:not(:disabled)");
+    if (btn) { e.preventDefault(); btn.click(); }
+  }
+});
 
 // ---------- 输入框上方：引用、技能 ----------
 

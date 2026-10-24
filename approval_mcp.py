@@ -3,6 +3,7 @@
 - approve：权限确认（--permission-prompt-tool）。Claude 遇到不在自动放行名单里的操作时调用，
   本脚本把请求转给中心服务，等网页端或语音里有人同意/拒绝后再返回。
 - skill_list / skill_checkout / skill_submit：在聊天里查看、修改、提交技能（提交后要管理员审核才生效）。
+- ask_user：弹出选项卡片让用户点选（像 Claude 桌面端那样），等用户回答后返回。
 """
 import json
 import logging
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field
 
 CENTER_URL = os.environ["CENTER_URL"]
 CENTER_TOKEN = os.environ["CENTER_TOKEN"]
@@ -58,6 +60,35 @@ async def approve(tool_name: str, input: dict, tool_use_id: str | None = None) -
         {"behavior": "deny", "message": decision.get("message") or "用户拒绝了这个操作，不要重试同样的操作"},
         ensure_ascii=False,
     )
+
+
+class Option(BaseModel):
+    label: str = Field(description="选项文字，简短（推荐的选项在末尾加“（推荐）”）")
+    description: str = Field("", description="一句话说明选这个会怎样")
+
+
+class Question(BaseModel):
+    question: str = Field(description="完整的问题，以问号结尾")
+    header: str = Field("", description="很短的标签，最多 6 个字，比如“模板”“范围”")
+    options: list[Option] = Field(description="2~4 个选项；用户总能另外选“其他”自己填写")
+    multi_select: bool = Field(False, description="可以多选时设为 true")
+
+
+@mcp.tool()
+async def ask_user(questions: list[Question]) -> str:
+    """在用户的屏幕上弹出选项卡片，让用户点选，等用户回答后返回结果。
+    需要用户在几个方案里做选择、或确认关键信息时使用；一次最多 4 个问题。
+    不要用它问显而易见的事情，也不要在回答文字里列选项等用户打字回复。"""
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:  # 等用户回答，可能很久
+            r = await client.post(CENTER_URL + "/api/questions", headers=HEADERS,
+                                  json={"session_id": CENTER_SESSION, "questions": [q.model_dump() for q in questions]})
+        if r.status_code != 200:
+            return f"没能弹出问题（中心服务返回 {r.status_code}），请直接在回答里问用户。"
+        return r.json().get("text", "用户没有回答。")
+    except Exception as e:  # noqa: BLE001
+        log.error("[%s] 提问失败：%r", CENTER_SESSION, e)
+        return f"没能弹出问题（{type(e).__name__}），请直接在回答里问用户。"
 
 
 @mcp.tool()
