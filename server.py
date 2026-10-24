@@ -24,7 +24,8 @@ from pydantic import BaseModel
 
 import files_api
 import skills_api
-from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, PORT, WS_ROOT,
+from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, PORT, TRASH, WS_ROOT,
+                   user_ws_dir,
                    adopt_orphans, avatar_of, get_setting, set_setting, board_user, check_password, current_user, db, find_claude, first_admin,
                    get_user, hash_password, is_admin, is_local, issue_token, jdump, posix_rule_path,
                    require_admin, require_internal, session_for, session_workspace, user_public)
@@ -208,9 +209,9 @@ def _hint_file(sess: dict, owner: dict) -> Path:
 
 def _deny_rules(owner: dict) -> list[str]:
     """软隔离：不让 Claude 用文件工具碰聊天记录库、待审核的 skill 和别人的工作区。"""
-    paths = [DATA / "center.db", DATA / "internal_token.txt", DATA / "mcp", DATA / "skills" / "submissions"]
-    for u in db("SELECT id FROM users WHERE id != ?", (owner["id"],)):
-        paths += [WS_ROOT / str(u["id"]), DATA / "plugins" / str(u["id"])]
+    paths = [DATA / "center.db", DATA / "internal_token.txt", DATA / "mcp", DATA / "skills" / "submissions", TRASH]
+    for u in db("SELECT * FROM users WHERE id != ?", (owner["id"],)):
+        paths += [user_ws_dir(u, create=False), DATA / "plugins" / str(u["id"])]
     rules = []
     for p in paths:
         pat = posix_rule_path(p) + ("/**" if p.suffix == "" else "")
@@ -387,7 +388,8 @@ async def start_turn(sess: dict, text: str, author: dict, refs: list[str] | None
     cwd = sess.get("work_dir") or str(FILE_ROOT)
     if not Path(cwd).is_dir():
         raise HTTPException(400, f"工作文件夹不存在：{cwd}")
-    extra = [session_workspace(sess)]
+    ws = session_workspace(sess, create=False)  # 工作区用到时才建，免得 D 盘里堆满空文件夹
+    extra = [ws] if ws and ws.exists() else []
     for r in refs:
         p = Path(r)
         extra.append(p if p.is_dir() else p.parent)
@@ -613,13 +615,15 @@ def admin_delete_user(uid: int, admin: dict = Depends(require_admin)):
         raise HTTPException(400, "不能删除板子账号或自己")
     if any(r.owner_id == uid for r in RUNS.values()):
         raise HTTPException(409, "这个用户还有任务在进行")
+    ud = user_ws_dir(u, create=False)  # 删账号记录之前先定位工作区
     for s in db("SELECT id FROM sessions WHERE user_id=?", (uid,)):
         db("DELETE FROM messages WHERE session_id=?", (s["id"],))
     for sql in ("DELETE FROM sessions WHERE user_id=?", "DELETE FROM links WHERE user_id=?",
                 "DELETE FROM tokens WHERE user_id=?", "DELETE FROM skill_access WHERE user_id=?",
                 "DELETE FROM users WHERE id=?"):
         db(sql, (uid,))
-    shutil.rmtree(WS_ROOT / str(uid), ignore_errors=True)
+    if ud.exists():
+        files_api.move_to_trash(ud, admin, f"删除用户 {u['display_name']}")
     shutil.rmtree(DATA / "plugins" / str(uid), ignore_errors=True)
     return {"ok": True}
 
@@ -819,7 +823,9 @@ def delete_session(sid: str, user: dict = Depends(current_user)):
     db("DELETE FROM messages WHERE session_id=?", (sid,))
     db("DELETE FROM sessions WHERE id=?", (sid,))
     db("DELETE FROM links WHERE session_id=?", (sid,))
-    shutil.rmtree(WS_ROOT / str(s["user_id"]) / sid, ignore_errors=True)
+    ws = session_workspace(s, create=False)
+    if ws and ws.exists():
+        files_api.move_to_trash(ws, user, f"删除会话 {s['title']}")
     for f in (f"{sid}.json", f"hint_{sid}.txt", f"settings_{sid}.json"):
         (DATA / "mcp" / f).unlink(missing_ok=True)
     broadcast({"type": "session_deleted", "session_id": sid}, s["user_id"])

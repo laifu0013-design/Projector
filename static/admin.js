@@ -26,6 +26,7 @@
       else if (t === "chats") await renderChats();
       else if (t === "library") await renderLibrary();
       else if (t === "settings") await renderSettings();
+      else if (t === "files") await renderFileOps();
       else await renderReview();
     } catch (e) { box().innerHTML = `<div class="err">${esc(e.message)}</div>`; }
     refreshPending();
@@ -245,6 +246,26 @@
         <div class="muted" style="font-size:13px">${esc(s.description)}</div></div></div>
        <div class="changelog"><b>更新说明</b>${esc(s.changelog || "（没写）")}</div>
        ${pending ? '<input class="field" id="rvNote" placeholder="给提交人的备注（可选）" style="margin-bottom:10px">' : ""}`, ch);
+  }
+
+  // ---------- 文件记录：谁在什么时候上传、改名、删除了什么 ----------
+
+  async function renderFileOps() {
+    const ops = await api("/api/admin/file-ops");
+    const color = { 上传: "approved", 覆盖上传: "pending", 新建文件夹: "approved", 改名: "pending", 删除: "rejected", 恢复: "approved", 彻底删除: "rejected" };
+    box().innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <div class="muted" style="font-size:13px;flex:1">在文件库里上传、新建、改名、删除、恢复的操作都会记在这里（最近 300 条）。删除的文件在回收站里保留 30 天。</div>
+        <button class="btn small" id="opTrash">${icon("trash", 14)}打开回收站</button>
+      </div>
+      ${ops.length ? `<table class="grid"><tr><th>时间</th><th>谁</th><th>操作</th><th>文件</th></tr>
+      ${ops.map((o, i) => `<tr style="animation-delay:${Math.min(i, 30) * 15}ms">
+        <td class="muted" style="font-size:12.5px;white-space:nowrap">${ftime(o.created)}</td>
+        <td><div class="ucell">${avatarEl(userOf(o.user_id).avatar, 24)}${esc(o.who || "—")}</div></td>
+        <td><span class="status ${color[o.action] || ""}">${esc(o.action)}</span></td>
+        <td style="font-size:13px;word-break:break-all" title="${esc(o.path)}">${esc(shortPath(o.path))}${o.detail ? ` <span class="muted">${esc(o.detail)}</span>` : ""}</td>
+      </tr>`).join("")}</table>` : `<div style="text-align:center;padding:30px 0">${orb(48)}<p class="muted">还没有文件操作记录。</p></div>`}`;
+    $("opTrash").onclick = () => openTrash();
   }
 
   // ---------- 设置：权限档位、命令名单 ----------

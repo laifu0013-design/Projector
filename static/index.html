@@ -18,7 +18,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script src="/static/ui.js?v=0.5.0"></script>
+<script src="/static/ui.js?v=0.5.1"></script>
 <style>
 /* ============ 主题：暖纸色（浅色）/ 台灯夜色（深色） ============ */
 :root {
@@ -425,6 +425,22 @@ textarea#input::placeholder { color: var(--faint); }
 .crumbs a:last-child { color: var(--ink); font-weight: 600; }
 #fq { width: 220px; padding: 6px 12px; border-radius: 10px; border: 1px solid var(--line2); background: var(--solid); font-size: 13.5px; outline: none; }
 #fq:focus { border-color: var(--accent); }
+.ftools { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.ftools .sp { flex: 1; }
+.fprog { position: relative; height: 26px; background: var(--code); border-bottom: 1px solid var(--line); overflow: hidden; }
+.fprog i { position: absolute; inset: 0 auto 0 0; width: 0; background: linear-gradient(90deg, var(--accent-soft), color-mix(in srgb, var(--accent) 30%, transparent)); transition: width .3s var(--ease); }
+.fprog span { position: relative; font-size: 12.5px; line-height: 26px; padding: 0 16px; color: var(--ink2); }
+.fi .acts { display: none; gap: 2px; }
+.fi:hover .acts { display: inline-flex; }
+.fi:hover .s { display: none; }
+.fi .acts .iconbtn { width: 26px; height: 26px; border-radius: 7px; }
+.fi .acts .iconbtn:hover { background: var(--raised); }
+.fi .acts .del:hover { color: var(--rose); }
+#flist.dragover { background: var(--accent-soft); outline: 2px dashed var(--accent); outline-offset: -6px; }
+.trash-row { display: flex; align-items: center; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--line); animation: rise .35s var(--ease) both; }
+.trash-row .tn { flex: 1; min-width: 0; }
+.trash-row .tn b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.trash-row .tn small { color: var(--muted); font-size: 12px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pickbar { display: flex; align-items: center; gap: 10px; padding: 9px 20px; font-size: 13px; background: var(--info-soft); color: var(--info); }
 .pickbar span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fbody { flex: 1; display: flex; min-height: 0; }
@@ -432,7 +448,7 @@ textarea#input::placeholder { color: var(--faint); }
 .fi { display: flex; gap: 10px; align-items: center; padding: 7px 9px; border-radius: 9px; cursor: pointer; font-size: 13.5px; transition: background .15s; animation: slidein .3s var(--ease) both; }
 .fi:hover { background: var(--code); }
 .fi.sel { background: var(--accent-soft); }
-.fi .fk { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font: 700 9px var(--f-mono); letter-spacing: .03em; flex-shrink: 0; color: #fff; }
+.fk { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font: 700 9px var(--f-mono); letter-spacing: .03em; flex-shrink: 0; color: #fff; }
 .fi .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fi .s { font-size: 11.5px; color: var(--faint); white-space: nowrap; }
 .fi .sub { display: block; font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
@@ -663,6 +679,16 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
     <button class="iconbtn closebtn" data-close></button>
   </header>
   <div class="pickbar" id="pickbar" hidden><span id="pickText"></span><button class="btn small primary" id="pickOk">选这个文件夹</button></div>
+  <div class="ftools" id="ftools">
+    <button class="btn small" id="fUpFile"></button>
+    <button class="btn small" id="fUpDir"></button>
+    <button class="btn small" id="fMkdir"></button>
+    <span class="sp"></span>
+    <span class="muted" id="fRO" hidden style="font-size:12.5px"></span>
+    <button class="btn small ghost" id="fTrash"></button>
+    <input type="file" id="fUpIn" multiple hidden><input type="file" id="fUpDirIn" webkitdirectory hidden>
+  </div>
+  <div class="fprog" id="fprog" hidden><i id="fprogBar"></i><span id="fprogText"></span></div>
   <div class="fbody" id="fbody">
     <div id="flist"></div>
     <div id="fview">
@@ -670,6 +696,8 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
         <button class="iconbtn" id="fback"></button>
         <span class="n" id="fname"></span>
         <button class="btn small" id="fref" hidden></button>
+        <button class="iconbtn" id="fren" hidden data-tip="重命名"></button>
+        <button class="iconbtn" id="fdel" hidden data-tip="删除"></button>
         <button class="btn small" id="flocal" hidden></button>
         <a class="btn small" id="fdown" hidden></a>
       </div>
@@ -682,7 +710,7 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
   <header><strong>管理后台</strong>
     <span class="seg" id="adminTabs">
       <button data-tab="users" class="on">用户</button><button data-tab="chats">聊天记录</button>
-      <button data-tab="library">技能库</button><button data-tab="review">待审核 <span id="pendingCount"></span></button><button data-tab="settings">设置</button>
+      <button data-tab="library">技能库</button><button data-tab="review">待审核 <span id="pendingCount"></span></button><button data-tab="files">文件记录</button><button data-tab="settings">设置</button>
     </span>
     <button class="iconbtn closebtn" data-close></button>
   </header>
@@ -726,7 +754,7 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
   </section>
 </div></div>
 
-<script src="/static/app.js?v=0.5.0"></script>
-<script src="/static/admin.js?v=0.5.0"></script>
+<script src="/static/app.js?v=0.5.1"></script>
+<script src="/static/admin.js?v=0.5.1"></script>
 </body>
 </html>

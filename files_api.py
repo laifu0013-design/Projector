@@ -1,12 +1,14 @@
-"""文件浏览、预览，以及每个人的工作区（同事本机文件上传到这里给 Claude 处理，再同步回去）。
+"""文件库：浏览、预览、上传、新建文件夹、改名、删除（进回收站，30 天内可恢复），以及每个人的工作区。
 
 路径写法（网页和接口之间）：
-  "合同/2026/a.docx"   工作目录（D 盘）里的相对路径
-  "ws:<会话>/报告/a.xlsx"  自己的工作区；管理员可以用 "ws<用户id>:" 看别人的
-  也接受 Claude 回复里出现的完整路径（D:\\合同\\a.docx），会自动换算
+  "合同/2026/a.docx"        文件库（D 盘）里的相对路径
+  "ws:2026-10-24 周报/a.xlsx" 自己的工作区；管理员可以用 "ws<用户id>:" 看别人的
+  也接受完整路径（D:\\合同\\a.docx），会自动换算
+工作区在 D:\\Projector工作区\\<显示名(用户名)>\\<日期 会话标题>\\，别人的工作区和回收站普通用户进不去。
 """
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -19,8 +21,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from store import (DATA, FILE_ROOT, WS_ROOT, current_user, db, is_admin, jdump, session_for,
-                   session_workspace)
+from store import (BASE, DATA, FILE_ROOT, TRASH, TRASH_DAYS, WS_ROOT, current_user, db, get_user, is_admin, jdump,
+                   log_file_op, require_admin, safe_name, session_for, session_workspace, user_ws_dir, ws_owner)
 
 router = APIRouter()
 
@@ -33,6 +35,8 @@ TEXT_LIMIT = 1024 * 1024
 MAX_UPLOAD = 1024 ** 3          # 单个文件最大 1 GB
 _soffice_lock = asyncio.Lock()
 _WS_RE = re.compile(r"^ws(\d*):(.*)$", re.S)
+DATA_DIR = DATA.resolve()
+BASE_DIR = BASE.resolve()
 
 
 # ---------- 路径换算和权限 ----------
@@ -41,25 +45,46 @@ def _within(p: Path, root: Path) -> bool:
     return p == root or p.is_relative_to(root)
 
 
+def _ws_owner_of(p: Path) -> int | None:
+    """工作区里的路径属于谁；工作区根目录、回收站返回 None"""
+    if not _within(p, WS_ROOT) or p == WS_ROOT:
+        return None
+    return ws_owner(p.relative_to(WS_ROOT).parts[0])
+
+
 def _check(target: Path, user: dict) -> Path:
-    """数据目录（聊天记录库、别人的工作区）不让碰；工作区只能看自己的。"""
+    """能不能看：系统数据不让碰；工作区只能看自己的；回收站和工作区根目录只有管理员能看。"""
     if _within(target, WS_ROOT):
-        rel = target.relative_to(WS_ROOT).parts
-        if not is_admin(user) and (not rel or rel[0] != str(user["id"])):
+        owner = _ws_owner_of(target)
+        if not is_admin(user) and owner != user["id"]:
             raise HTTPException(403, "只能访问自己的工作区")
         return target
-    if _within(target, DATA.resolve()):
+    if _within(target, DATA_DIR):
         raise HTTPException(403, "这里是系统数据，不能访问")
     if not _within(target, FILE_ROOT):
-        raise HTTPException(403, "只能访问工作目录里的文件")
+        raise HTTPException(403, "只能访问文件库里的文件")
+    return target
+
+
+def _check_write(target: Path, user: dict) -> Path:
+    """能不能改：在能看的基础上，再挡住程序自己的文件夹、工作区和个人文件夹的根、回收站。"""
+    _check(target, user)
+    if target in (FILE_ROOT, WS_ROOT, TRASH) or _within(target, TRASH):
+        raise HTTPException(403, "这个位置不能修改")
+    if _within(target, BASE_DIR) or _within(BASE_DIR, target):
+        raise HTTPException(403, "这是 Projector 程序所在的文件夹，不能在这里修改")
+    if target.parent == WS_ROOT:
+        raise HTTPException(403, "个人工作区文件夹本身不能改，里面的可以")
     return target
 
 
 def resolve_path(path: str, user: dict, must_exist: bool = True) -> Path:
     raw = (path or "").strip().strip('"')
     if m := _WS_RE.match(raw):
-        uid = m.group(1) or str(user["id"])
-        target = (WS_ROOT / uid / m.group(2).lstrip("/\\")).resolve()
+        u = get_user(int(m.group(1))) if m.group(1) else user
+        if not u:
+            raise HTTPException(404, "没有这个用户")
+        target = (user_ws_dir(u) / m.group(2).lstrip("/\\")).resolve()
     elif Path(raw).is_absolute():
         target = Path(raw).resolve()
     else:
@@ -71,31 +96,28 @@ def resolve_path(path: str, user: dict, must_exist: bool = True) -> Path:
 
 
 def to_virtual(p: Path, user: dict) -> str:
-    if _within(p, WS_ROOT):
-        parts = p.relative_to(WS_ROOT).parts
-        uid, rest = (parts[0] if parts else str(user["id"])), "/".join(parts[1:])
-        return f"ws:{rest}" if uid == str(user["id"]) else f"ws{uid}:{rest}"
-    return "" if p == FILE_ROOT else p.relative_to(FILE_ROOT).as_posix()
-
-
-def _session_titles(uid: str) -> dict:
-    return {s["id"]: s["title"] for s in db("SELECT id, title FROM sessions WHERE user_id=?", (uid,))}
+    owner = _ws_owner_of(p)
+    if owner is not None:
+        rest = "/".join(p.relative_to(WS_ROOT).parts[1:])
+        return f"ws:{rest}" if owner == user["id"] else f"ws{owner}:{rest}"
+    if _within(p, FILE_ROOT):
+        return "" if p == FILE_ROOT else p.relative_to(FILE_ROOT).as_posix()
+    return str(p)
 
 
 def crumbs_for(p: Path, user: dict) -> list[dict]:
-    if _within(p, WS_ROOT):
+    owner = _ws_owner_of(p)
+    if owner is not None:
         parts = p.relative_to(WS_ROOT).parts
-        uid = parts[0] if parts else str(user["id"])
-        prefix = "ws:" if uid == str(user["id"]) else f"ws{uid}:"
-        owner = "" if uid == str(user["id"]) else ((db("SELECT display_name FROM users WHERE id=?", (uid,), one=True)
-                                                     or {}).get("display_name", uid) + " 的")
-        out = [{"label": owner + "工作区", "path": prefix}]
-        titles = _session_titles(uid)
+        prefix = "ws:" if owner == user["id"] else f"ws{owner}:"
+        label = "我的工作区" if owner == user["id"] else ((get_user(owner) or {}).get("display_name", "") + " 的工作区")
+        out = [{"label": label, "path": prefix}]
         for i, part in enumerate(parts[1:], start=1):
-            out.append({"label": titles.get(part, part) if i == 1 else part, "path": prefix + "/".join(parts[1:i + 1])})
+            out.append({"label": part, "path": prefix + "/".join(parts[1:i + 1])})
         return out
-    out = [{"label": str(FILE_ROOT), "path": ""}]
-    if p != FILE_ROOT:
+    # 根目录是整个盘（D:\）就直接显示盘符，否则显示“文件库”，免得长路径把后面挤掉
+    out = [{"label": str(FILE_ROOT) if FILE_ROOT.parent == FILE_ROOT else "文件库", "path": ""}]
+    if p != FILE_ROOT and _within(p, FILE_ROOT):
         parts = p.relative_to(FILE_ROOT).parts
         for i, part in enumerate(parts):
             out.append({"label": part, "path": "/".join(parts[:i + 1])})
@@ -103,25 +125,22 @@ def crumbs_for(p: Path, user: dict) -> list[dict]:
 
 
 def _hidden(entry: os.DirEntry) -> bool:
-    if entry.name.lower() in HIDDEN_NAMES or entry.name.startswith("~$"):
+    if entry.name.lower() in HIDDEN_NAMES or entry.name.startswith("~$") or entry.name.endswith(".uploading"):
         return True
     attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
     return bool(attrs & 0x6)  # Windows 的隐藏、系统属性
 
 
-def entry_info(p: Path, user: dict, st=None, name=None) -> dict:
+def entry_info(p: Path, user: dict, st=None) -> dict:
     st = st or p.stat()
     is_dir = p.is_dir()
-    return {"name": name or p.name, "dir": is_dir, "size": 0 if is_dir else st.st_size, "mtime": st.st_mtime,
+    return {"name": p.name, "dir": is_dir, "size": 0 if is_dir else st.st_size, "mtime": st.st_mtime,
             "path": to_virtual(p, user), "abs": str(p)}
 
 
 def list_dir(d: Path, user: dict, limit: int = 3000) -> list[dict]:
-    data_dir = DATA.resolve()
-    titles = None
-    if d.parent == WS_ROOT:  # 工作区第一层是各个会话的文件夹，显示会话标题
-        titles = _session_titles(d.name)
     items = []
+    admin = is_admin(user)
     try:
         with os.scandir(d) as it:
             for e in it:
@@ -129,9 +148,13 @@ def list_dir(d: Path, user: dict, limit: int = 3000) -> list[dict]:
                     if _hidden(e):
                         continue
                     p = Path(e.path)
-                    if e.name.lower() == "data" and p.resolve() == data_dir:
+                    if e.name.lower() == "data" and p.resolve() == DATA_DIR:
                         continue  # 项目在 D 盘里时，不显示系统数据文件夹
-                    items.append(entry_info(p, user, e.stat(), titles.get(e.name, e.name) if titles else None))
+                    if p == WS_ROOT and not admin:
+                        continue  # 普通用户从“我的工作区”进自己的那份
+                    if d == WS_ROOT and not admin and ws_owner(e.name) != user["id"]:
+                        continue
+                    items.append(entry_info(p, user, e.stat()))
                 except OSError:
                     continue  # 没权限或已删除
                 if len(items) >= limit:
@@ -142,6 +165,14 @@ def list_dir(d: Path, user: dict, limit: int = 3000) -> list[dict]:
     return items
 
 
+def _writable(p: Path, user: dict) -> bool:
+    try:
+        _check_write(p / "_", user)  # 能不能在这个文件夹里新建东西
+        return True
+    except HTTPException:
+        return False
+
+
 # ---------- 浏览和预览 ----------
 
 @router.get("/api/files")
@@ -149,16 +180,13 @@ def files_list(path: str = "", user: dict = Depends(current_user)):
     """列出文件夹；传的是文件就列出它所在的文件夹，并用 select 标出这个文件。"""
     target = resolve_path(path, user, must_exist=False)
     if not target.exists():
-        if _within(target, WS_ROOT):
-            target.mkdir(parents=True, exist_ok=True)  # 自己的工作区第一次打开时还没建
-        else:
-            raise HTTPException(404, "文件不存在")
+        raise HTTPException(404, "文件夹不存在")
     select = None
     if target.is_file():
         select, target = to_virtual(target, user), target.parent
     return {"path": to_virtual(target, user), "abs": str(target), "crumbs": crumbs_for(target, user),
             "select": select, "entries": list_dir(target, user), "office": bool(SOFFICE),
-            "roots": [str(FILE_ROOT), str(WS_ROOT)]}
+            "writable": _writable(target, user), "roots": [str(FILE_ROOT), str(WS_ROOT)]}
 
 
 @router.get("/api/files/search")
@@ -167,15 +195,23 @@ def files_search(q: str, path: str = "", user: dict = Depends(current_user)):
     base, words = resolve_path(path, user), q.lower().split()
     if not words:
         return {"results": [], "partial": False}
-    data_dir = DATA.resolve()
+    admin = is_admin(user)
     results, end, partial = [], time.time() + 8, False
     for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [n for n in dirnames if n.lower() not in HIDDEN_NAMES and not n.startswith(".")
-                       and (Path(dirpath) / n).resolve() != data_dir]
+        here = Path(dirpath)
+        keep = []
+        for n in dirnames:
+            full = (here / n)
+            if n.lower() in HIDDEN_NAMES or n.startswith(".") or full.resolve() == DATA_DIR:
+                continue
+            if not admin and (full == WS_ROOT or (here == WS_ROOT and ws_owner(n) != user["id"])):
+                continue
+            keep.append(n)
+        dirnames[:] = keep
         for name in dirnames + filenames:
             if all(w in name.lower() for w in words):
                 try:
-                    results.append(entry_info(Path(dirpath) / name, user))
+                    results.append(entry_info(here / name, user))
                 except OSError:
                     continue
         if len(results) >= 200 or time.time() > end:
@@ -244,17 +280,220 @@ async def files_pdf(path: str, user: dict = Depends(current_user)):
                         content_disposition_type="inline")
 
 
-# ---------- 工作区：同事本机的文件上传到这里，处理完再同步回去 ----------
-
-class NewLink(BaseModel):
-    name: str
-
+# ---------- 修改文件库：上传、新建文件夹、改名、删除（进回收站） ----------
 
 def _safe_rel(rel: str) -> Path:
     parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".")]
     if not parts or any(p == ".." or ":" in p for p in parts):
         raise HTTPException(400, "文件路径不对")
-    return Path(*parts)
+    return Path(*[safe_name(p, 120) for p in parts])
+
+
+def _unique(p: Path) -> Path:
+    """同名时加 (2)、(3)……"""
+    if not p.exists():
+        return p
+    n = 2
+    while True:
+        cand = p.with_name(f"{p.stem} ({n}){p.suffix}") if p.is_file() or p.suffix else p.with_name(f"{p.name} ({n})")
+        if not cand.exists():
+            return cand
+        n += 1
+
+
+def _busy(e: Exception) -> HTTPException:
+    return HTTPException(409, f"操作失败，文件可能正被别的程序打开：{e}")
+
+
+def move_to_trash(p: Path, user: dict, reason: str = "删除") -> dict:
+    """把文件或文件夹挪进回收站并记一笔；30 天后自动清掉。"""
+    tid = uuid.uuid4().hex[:10]
+    slot = TRASH / f"{time.strftime('%Y%m%d-%H%M%S')}_{tid}"
+    slot.mkdir(parents=True, exist_ok=True)
+    size = p.stat().st_size if p.is_file() else sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+    is_dir = p.is_dir()
+    try:
+        shutil.move(str(p), str(slot / p.name))
+    except OSError as e:
+        shutil.rmtree(slot, ignore_errors=True)
+        raise _busy(e)
+    db("INSERT INTO trash (id, name, orig_path, trash_path, is_dir, size, deleted_by, deleted_at, reason) VALUES (?,?,?,?,?,?,?,?,?)",
+       (tid, p.name, str(p), str(slot / p.name), int(is_dir), size, user["id"], time.time(), reason))
+    return {"id": tid, "name": p.name}
+
+
+def purge_trash() -> None:
+    cutoff = time.time() - TRASH_DAYS * 86400
+    for row in db("SELECT * FROM trash WHERE deleted_at < ?", (cutoff,)):
+        shutil.rmtree(Path(row["trash_path"]).parent, ignore_errors=True)
+        db("DELETE FROM trash WHERE id=?", (row["id"],))
+
+
+class MkdirBody(BaseModel):
+    path: str = ""
+    name: str
+
+
+class RenameBody(BaseModel):
+    path: str
+    name: str
+
+
+class DeleteBody(BaseModel):
+    paths: list[str]
+
+
+@router.post("/api/files/mkdir")
+def files_mkdir(body: MkdirBody, user: dict = Depends(current_user)):
+    parent = resolve_path(body.path, user)
+    target = parent / safe_name(body.name, 120)
+    _check_write(target, user)
+    if target.exists():
+        raise HTTPException(409, "已经有同名的文件或文件夹")
+    target.mkdir(parents=True)
+    log_file_op(user, "新建文件夹", target)
+    return entry_info(target, user)
+
+
+@router.put("/api/files/upload")
+async def files_upload(request: Request, dir: str, name: str, on_conflict: str = "ask", user: dict = Depends(current_user)):
+    """上传一个文件到文件库的某个文件夹；name 可以带子文件夹（上传整个文件夹时）。
+    on_conflict：ask 同名时返回 409 让网页问用户；overwrite 覆盖（旧文件进回收站）；rename 自动改名保留两份。"""
+    parent = resolve_path(dir, user)
+    if not parent.is_dir():
+        raise HTTPException(400, "要上传到一个文件夹里")
+    dest = (parent / _safe_rel(name)).resolve()
+    if not _within(dest, parent):
+        raise HTTPException(400, "文件路径不对")
+    _check_write(dest, user)
+    if int(request.headers.get("content-length") or 0) > MAX_UPLOAD:
+        raise HTTPException(413, "单个文件不能超过 1 GB")
+    replaced = None
+    if dest.exists():
+        if dest.is_dir():
+            raise HTTPException(409, f"已经有同名文件夹：{dest.name}")
+        if on_conflict == "rename":
+            dest = _unique(dest)
+        elif on_conflict == "overwrite":
+            replaced = dest
+        else:
+            raise HTTPException(409, json.dumps({"exists": True, "name": dest.name}, ensure_ascii=False))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp, size = dest.with_name(dest.name + ".uploading"), 0
+    with open(tmp, "wb") as f:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_UPLOAD:
+                f.close()
+                tmp.unlink(missing_ok=True)
+                raise HTTPException(413, "单个文件不能超过 1 GB")
+            f.write(chunk)
+    if replaced:
+        try:
+            move_to_trash(replaced, user, "上传时被覆盖")
+        except HTTPException:
+            tmp.unlink(missing_ok=True)
+            raise
+    try:
+        tmp.replace(dest)
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        raise _busy(e)
+    log_file_op(user, "覆盖上传" if replaced else "上传", dest, f"{size} 字节")
+    return entry_info(dest, user)
+
+
+@router.post("/api/files/rename")
+def files_rename(body: RenameBody, user: dict = Depends(current_user)):
+    src = resolve_path(body.path, user)
+    _check_write(src, user)
+    dest = src.with_name(safe_name(body.name, 120))
+    _check_write(dest, user)
+    if dest == src:
+        return entry_info(src, user)
+    if dest.exists() and dest.name.lower() != src.name.lower():
+        raise HTTPException(409, "已经有同名的文件或文件夹")
+    try:
+        src.rename(dest)
+    except OSError as e:
+        raise _busy(e)
+    log_file_op(user, "改名", src, f"→ {dest.name}")
+    return entry_info(dest, user)
+
+
+@router.post("/api/files/delete")
+def files_delete(body: DeleteBody, user: dict = Depends(current_user)):
+    done, failed = [], []
+    for raw in body.paths[:200]:
+        try:
+            p = resolve_path(raw, user)
+            _check_write(p, user)
+            done.append(move_to_trash(p, user))
+            log_file_op(user, "删除", p, "移到回收站")
+        except HTTPException as e:
+            failed.append({"path": raw, "error": e.detail})
+    return {"deleted": done, "failed": failed}
+
+
+# ---------- 回收站 ----------
+
+@router.get("/api/trash")
+def trash_list(user: dict = Depends(current_user)):
+    purge_trash()
+    sql = "SELECT t.*, u.display_name AS who FROM trash t LEFT JOIN users u ON u.id=t.deleted_by"
+    rows = db(sql + " ORDER BY t.deleted_at DESC") if is_admin(user) else \
+        db(sql + " WHERE t.deleted_by=? ORDER BY t.deleted_at DESC", (user["id"],))
+    for r in rows:
+        r["days_left"] = max(0, TRASH_DAYS - int((time.time() - r["deleted_at"]) // 86400))
+        r["orig_virtual"] = to_virtual(Path(r["orig_path"]), user) if _within(Path(r["orig_path"]), FILE_ROOT) or _within(Path(r["orig_path"]), WS_ROOT) else r["orig_path"]
+    return {"items": rows, "days": TRASH_DAYS}
+
+
+def _trash_item(tid: str, user: dict) -> dict:
+    row = db("SELECT * FROM trash WHERE id=?", (tid,), one=True)
+    if not row or (not is_admin(user) and row["deleted_by"] != user["id"]):
+        raise HTTPException(404, "回收站里没有这个文件")
+    return row
+
+
+@router.post("/api/trash/{tid}/restore")
+def trash_restore(tid: str, user: dict = Depends(current_user)):
+    row = _trash_item(tid, user)
+    src, orig = Path(row["trash_path"]), Path(row["orig_path"])
+    if not src.exists():
+        db("DELETE FROM trash WHERE id=?", (tid,))
+        raise HTTPException(404, "回收站里的文件已经不在了")
+    orig.parent.mkdir(parents=True, exist_ok=True)
+    dest = _unique(orig) if orig.exists() else orig
+    try:
+        shutil.move(str(src), str(dest))
+    except OSError as e:
+        raise _busy(e)
+    shutil.rmtree(src.parent, ignore_errors=True)
+    db("DELETE FROM trash WHERE id=?", (tid,))
+    log_file_op(user, "恢复", dest)
+    return {"restored": str(dest), "path": to_virtual(dest, user), "renamed": dest != orig}
+
+
+@router.delete("/api/trash/{tid}")
+def trash_purge_one(tid: str, admin: dict = Depends(require_admin)):
+    row = _trash_item(tid, admin)
+    shutil.rmtree(Path(row["trash_path"]).parent, ignore_errors=True)
+    db("DELETE FROM trash WHERE id=?", (tid,))
+    log_file_op(admin, "彻底删除", row["orig_path"])
+    return {"ok": True}
+
+
+@router.get("/api/admin/file-ops")
+def file_ops(limit: int = 300, admin: dict = Depends(require_admin)):
+    return db("SELECT f.*, u.display_name AS who, u.avatar, u.id AS uid, u.role FROM file_ops f "
+              "LEFT JOIN users u ON u.id=f.user_id ORDER BY f.id DESC LIMIT ?", (min(limit, 2000),))
+
+
+# ---------- 工作区：同事本机的文件上传到这里，处理完再同步回去 ----------
+
+class NewLink(BaseModel):
+    name: str
 
 
 def _link(sess: dict, lid: str) -> tuple[dict, Path]:
@@ -285,7 +524,7 @@ def links_list(sid: str, user: dict = Depends(current_user)):
 def links_create(sid: str, body: NewLink, user: dict = Depends(current_user)):
     sess = session_for(sid, user)
     _owner_only(sess, user)
-    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", body.name.strip()).strip(". ")[:60] or "上传"
+    base = safe_name(body.name) or "上传"
     ws, name, n = session_workspace(sess), base, 2
     while (ws / name).exists():
         name, n = f"{base}-{n}", n + 1
@@ -353,7 +592,6 @@ def links_snapshot(sid: str, lid: str, user: dict = Depends(current_user)):
 
 @router.get("/api/sessions/{sid}/links/{lid}/changes")
 def links_changes(sid: str, lid: str, user: dict = Depends(current_user)):
-    import json
     sess = session_for(sid, user)
     row, root = _link(sess, lid)
     old = json.loads(row["manifest"] or "{}")
@@ -380,6 +618,7 @@ def links_delete(sid: str, lid: str, user: dict = Depends(current_user)):
     sess = session_for(sid, user)
     _owner_only(sess, user)
     _, root = _link(sess, lid)
-    shutil.rmtree(root, ignore_errors=True)
+    if root.exists():
+        move_to_trash(root, user, "删除上传的文件夹")
     db("DELETE FROM links WHERE id=?", (lid,))
     return {"ok": True}

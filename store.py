@@ -4,6 +4,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -21,7 +22,19 @@ for _d in ("mcp", "workspaces", "skills/library", "skills/submissions", "skills/
 
 WORK_DIR = os.environ.get("CLAUDE_WORK_DIR", "D:\\")
 FILE_ROOT = Path(os.environ.get("FILES_ROOT") or WORK_DIR).resolve()
-WS_ROOT = (DATA / "workspaces").resolve()
+# 每个人的工作区放在文件库（D 盘）里，文件夹名一看就知道是谁的哪个会话：
+#   D:\Projector工作区\张三(zhang)\2026-10-24 九月采购合同汇总\
+OLD_WS = (DATA / "workspaces").resolve()
+if os.environ.get("WORKSPACE_ROOT"):
+    WS_ROOT = Path(os.environ["WORKSPACE_ROOT"])
+elif FILE_ROOT.is_dir():
+    WS_ROOT = FILE_ROOT / "Projector工作区"
+else:
+    WS_ROOT = OLD_WS
+WS_ROOT.mkdir(parents=True, exist_ok=True)
+WS_ROOT = WS_ROOT.resolve()
+TRASH = WS_ROOT / "回收站"
+TRASH_DAYS = 30
 LIBRARY = (DATA / "skills" / "library").resolve()
 SUBMISSIONS = (DATA / "skills" / "submissions").resolve()
 VERSIONS = (DATA / "skills" / "versions").resolve()
@@ -111,11 +124,17 @@ _db.executescript(
         name TEXT, version INTEGER, submission_id TEXT, submitted_by INTEGER, approved_by INTEGER,
         changelog TEXT, created REAL, PRIMARY KEY (name, version));
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS trash (
+        id TEXT PRIMARY KEY, name TEXT, orig_path TEXT, trash_path TEXT, is_dir INTEGER, size INTEGER,
+        deleted_by INTEGER, deleted_at REAL, reason TEXT);
+    CREATE TABLE IF NOT EXISTS file_ops (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, action TEXT, path TEXT, detail TEXT, created REAL);
     """
 )
 for _table, _col in (("sessions", "bypass INTEGER DEFAULT 0"), ("sessions", "created_by TEXT DEFAULT ''"),
                      ("sessions", "user_id INTEGER"), ("sessions", "work_dir TEXT"), ("users", "avatar TEXT"),
-                     ("library", "version INTEGER DEFAULT 1"), ("submissions", "changelog TEXT")):
+                     ("library", "version INTEGER DEFAULT 1"), ("submissions", "changelog TEXT"),
+                     ("users", "ws_name TEXT"), ("sessions", "ws_dir TEXT")):
     try:
         _db.execute(f"ALTER TABLE {_table} ADD COLUMN {_col}")
     except sqlite3.OperationalError:
@@ -288,7 +307,93 @@ def session_for(sid: str, user: dict) -> dict:
     return s
 
 
-def session_workspace(sess: dict) -> Path:
-    d = WS_ROOT / str(sess["user_id"]) / sess["id"]
-    d.mkdir(parents=True, exist_ok=True)
+_ws_lock = threading.Lock()
+
+
+def safe_name(name: str, limit: int = 60) -> str:
+    """能当 Windows 文件夹名的字符串"""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "").strip(" .")
+    return name[:limit].strip(" .") or "未命名"
+
+
+def user_ws_dir(u: dict, create: bool = True) -> Path:
+    """某个人的工作区文件夹：显示名(用户名)，第一次用到时定下来，之后改显示名也不变"""
+    with _ws_lock:
+        name = (db("SELECT ws_name FROM users WHERE id=?", (u["id"],), one=True) or {}).get("ws_name")
+        if not name:
+            base = safe_name(f"{u['display_name']}({u['username']})")
+            name, n = base, 2
+            while (WS_ROOT / name).exists() or db("SELECT 1 FROM users WHERE ws_name=?", (name,), one=True):
+                name, n = f"{base}-{n}", n + 1
+            db("UPDATE users SET ws_name=? WHERE id=?", (name, u["id"]))
+    d = WS_ROOT / name
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def ws_owner(folder: str) -> int | None:
+    """工作区第一层文件夹名 → 用户 id"""
+    row = db("SELECT id FROM users WHERE ws_name=?", (folder,), one=True)
+    return row["id"] if row else None
+
+
+def session_workspace(sess: dict, create: bool = True) -> Path | None:
+    """会话的工作区文件夹：日期 会话标题；第一次用到时才建，之后会话改名也不变（免得路径失效）"""
+    row = db("SELECT id, user_id, title, created, ws_dir FROM sessions WHERE id=?", (sess["id"],), one=True) or sess
+    owner = get_user(row["user_id"])
+    if not owner:
+        return None
+    base = user_ws_dir(owner, create)
+    name = row.get("ws_dir")
+    if not name:
+        if not create:
+            return None
+        with _ws_lock:
+            name = (db("SELECT ws_dir FROM sessions WHERE id=?", (row["id"],), one=True) or {}).get("ws_dir")
+            if not name:
+                day = time.strftime("%Y-%m-%d", time.localtime(row.get("created") or time.time()))
+                stem = safe_name(f"{day} {row.get('title') or '会话'}")
+                name, n = stem, 2
+                while (base / name).exists():
+                    name, n = f"{stem} ({n})", n + 1
+                db("UPDATE sessions SET ws_dir=? WHERE id=?", (name, row["id"]))
+    d = base / name
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _migrate_workspaces() -> None:
+    """老版本的工作区（data/workspaces/用户id/会话id）搬到新位置"""
+    if OLD_WS == WS_ROOT or not OLD_WS.is_dir():
+        return
+    import shutil
+    for udir in OLD_WS.iterdir():
+        if not (udir.is_dir() and udir.name.isdigit()):
+            continue
+        for sdir in udir.iterdir():
+            sess = db("SELECT * FROM sessions WHERE id=?", (sdir.name,), one=True)
+            if not sess or not sdir.is_dir():
+                continue
+            dest = session_workspace(sess)
+            for child in sdir.iterdir():
+                target = dest / child.name
+                if not target.exists():
+                    shutil.move(str(child), str(target))
+            try:
+                sdir.rmdir()
+            except OSError:
+                pass
+        try:
+            udir.rmdir()  # 搬空了就删掉
+        except OSError:
+            pass
+
+
+def log_file_op(user: dict, action: str, path, detail: str = "") -> None:
+    db("INSERT INTO file_ops (user_id, action, path, detail, created) VALUES (?,?,?,?,?)",
+       (user.get("id"), action, str(path), detail[:500], time.time()))
+
+
+_migrate_workspaces()

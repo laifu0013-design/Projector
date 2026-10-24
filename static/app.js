@@ -113,6 +113,12 @@ function paintStatic() {
   $("fref").innerHTML = icon("clip", 14) + "引用到对话";
   $("flocal").innerHTML = icon("external", 14) + "用本机程序打开";
   $("fdown").innerHTML = icon("download", 14) + "下载";
+  $("fUpFile").innerHTML = icon("upload", 14) + "上传文件";
+  $("fUpDir").innerHTML = icon("folder", 14) + "上传文件夹";
+  $("fMkdir").innerHTML = icon("plus", 14) + "新建文件夹";
+  $("fTrash").innerHTML = icon("trash", 14) + "回收站";
+  $("fren").innerHTML = icon("edit", 16);
+  $("fdel").innerHTML = icon("trash", 16);
   $("palIcon").innerHTML = icon("search", 18);
   document.querySelectorAll(".closebtn").forEach(b => b.innerHTML = icon("x"));
   // 登录页：橙光球外面两圈慢慢转动的水果头像
@@ -713,13 +719,23 @@ async function addLocalFolder() {
 // 拖文件进窗口
 let dragDepth = 0;
 const hasFiles = e => [...(e.dataTransfer?.types || [])].includes("Files");
-window.addEventListener("dragenter", e => { if (!hasFiles(e) || !me || !isMine()) return; dragDepth++; $("dropzone").classList.add("show"); });
+window.addEventListener("dragenter", e => {
+  if (!hasFiles(e) || !me) return;
+  const toLibrary = $("filesBox").classList.contains("show") && F.mode === "browse";
+  if (!toLibrary && !isMine()) return;
+  dragDepth++;
+  $("dropzone").querySelector(".dz div").textContent = toLibrary ? "松手，上传到这个文件夹" : "松手，交给 Claude";
+  $("dropzone").querySelector(".dz p").textContent = toLibrary ? (F.writable ? F.abs : "这个位置只能看，不能上传") : "文件会上传到你自己的工作区";
+  $("dropzone").classList.add("show");
+});
 window.addEventListener("dragleave", e => { if (!hasFiles(e)) return; if (--dragDepth <= 0) { dragDepth = 0; $("dropzone").classList.remove("show"); } });
 window.addEventListener("dragover", e => { if (hasFiles(e)) e.preventDefault(); });
 window.addEventListener("drop", async e => {
   if (!hasFiles(e)) return;
   e.preventDefault(); dragDepth = 0; $("dropzone").classList.remove("show");
-  if (!me || !isMine()) return;
+  const toLibrary = $("filesBox").classList.contains("show") && F.mode === "browse";
+  if (!me || (!toLibrary && !isMine())) return;
+  if (toLibrary && !F.writable) return toast("这个位置只能看，不能上传", "err");
   const files = [];
   const walk = (entry, prefix) => new Promise(resolve => {
     if (entry.isFile) entry.file(f => { files.push({ file: f, rel: prefix + f.name }); resolve(); }, resolve);
@@ -735,6 +751,7 @@ window.addEventListener("drop", async e => {
   const entries = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
   if (entries.length) for (const en of entries) await walk(en, "");
   else files.push(...[...e.dataTransfer.files].map(f => ({ file: f, rel: f.name })));
+  if (toLibrary) return uploadToLibrary(files);
   // 只拖了一个文件夹：去掉最外层，直接用文件夹名
   let name = "上传的文件";
   if (entries.length === 1 && entries[0].isDirectory) {
@@ -788,7 +805,7 @@ async function syncBack(lid) {
 // ---------- 文件浏览和预览 ----------
 // 模式：browse 浏览；workdir 选工作文件夹
 
-const F = { roots: [], office: false, path: "", abs: "", entries: [], sel: null, selEntry: null, searching: false, opened: false, mode: "browse" };
+const F = { roots: [], office: false, path: "", abs: "", entries: [], sel: null, selEntry: null, searching: false, opened: false, mode: "browse", writable: false };
 const EXT = {
   image: "png jpg jpeg gif webp bmp svg ico avif tif tiff heic",
   pdf: "pdf",
@@ -836,7 +853,8 @@ function renderList() {
       ${fileBadge(e)}
       <span class="n">${esc(e.name)}${F.searching ? `<span class="sub">${esc(e.path)}</span>` : ""}</span>
       <span class="s">${e.dir ? "" : fsize(e.size) + " · "}${fdate(e.mtime)}</span>
-    </div>`).join("") : '<div class="empty-note" style="padding:24px;text-align:center">这里是空的</div>';
+      ${F.writable && F.mode === "browse" && !F.searching ? `<span class="acts"><button class="iconbtn" data-ren="${i}" title="重命名">${icon("edit", 14)}</button><button class="iconbtn del" data-delf="${i}" title="删除（进回收站）">${icon("trash", 14)}</button></span>` : ""}
+    </div>`).join("") : `<div class="empty-note" style="padding:24px;text-align:center">这里是空的${F.writable && F.mode === "browse" ? "<br>可以把文件拖进来上传" : ""}</div>`;
   const sel = $("flist").querySelector(".sel");
   if (sel) sel.scrollIntoView({ block: "nearest" });
 }
@@ -850,8 +868,9 @@ async function openDir(path) {
   $("flist").innerHTML = '<div class="empty-note" style="padding:14px">读取中…</div>';
   try {
     const d = await api("/api/files?path=" + encodeURIComponent(path));
-    Object.assign(F, { roots: d.roots, office: d.office, path: d.path, abs: d.abs, entries: d.entries });
+    Object.assign(F, { roots: d.roots, office: d.office, path: d.path, abs: d.abs, entries: d.entries, writable: d.writable });
     renderCrumbs(d.crumbs);
+    paintFileTools();
     if (F.mode === "workdir") $("pickText").textContent = "当前：" + d.abs;
     if (d.select) { const e = d.entries.find(x => x.path === d.select); if (e) return preview(e); }
     renderList();
@@ -882,6 +901,7 @@ async function preview(e) {
   $("fdown").hidden = false; $("fdown").href = fileUrl(e.path) + "&download=1"; $("fdown").setAttribute("download", e.name);
   $("fref").hidden = !isMine();
   $("flocal").hidden = !IS_DESKTOP;
+  $("fren").hidden = $("fdel").hidden = !(F.writable && F.mode === "browse");
   const box = $("fcontent");
   const kind = kindOf(e.name);
   const url = fileUrl(e.path);
@@ -936,6 +956,7 @@ async function preview(e) {
 function showFiles(path = null, mode = "browse") {
   F.mode = mode;
   $("pickbar").hidden = mode !== "workdir";
+  $("ftools").hidden = mode !== "browse";
   $("frefDir").hidden = mode !== "browse" || !isMine();
   if (mode === "workdir") $("pickText").textContent = "选一个文件夹作为这个会话的工作文件夹";
   if (!F.sel) fileEmpty("选择左边的文件预览", "eye");
@@ -945,6 +966,145 @@ function showFiles(path = null, mode = "browse") {
   else if (!F.opened || mode === "workdir") openDir(F.path);
   F.opened = true;
 }
+
+// ---------- 文件库管理：上传、新建、改名、删除、回收站 ----------
+
+function paintFileTools() {
+  const w = F.writable;
+  for (const id of ["fUpFile", "fUpDir", "fMkdir"]) $(id).disabled = !w;
+  $("fRO").hidden = w;
+  $("fRO").textContent = "这个位置只能看，不能修改";
+}
+
+async function mkdirHere() {
+  const name = prompt("新文件夹的名字");
+  if (!name || !name.trim()) return;
+  try {
+    const e = await post("/api/files/mkdir", { path: F.path, name: name.trim() });
+    toast("已新建文件夹：" + e.name, "ok", 2000);
+    await openDir(F.path);
+  } catch (err) { toast(err.message, "err"); }
+}
+
+async function renameEntry(e) {
+  const name = prompt("改成什么名字？", e.name);
+  if (!name || name.trim() === e.name) return;
+  try {
+    const r = await post("/api/files/rename", { path: e.path, name: name.trim() });
+    toast("已改名为 " + r.name, "ok", 2000);
+    if (F.sel === e.path) { F.sel = r.path; }
+    await openDir(F.path);
+  } catch (err) { toast(err.message, "err"); }
+}
+
+async function deleteEntries(list) {
+  const names = list.map(e => (e.dir ? "📁 " : "") + e.name).join("\n");
+  if (!confirm(`把下面的${list.length > 1 ? " " + list.length + " 项" : ""}移到回收站？30 天内可以恢复。\n\n${names}`)) return;
+  try {
+    const r = await post("/api/files/delete", { paths: list.map(e => e.path) });
+    if (r.failed.length) toast("有 " + r.failed.length + " 项没删掉：" + r.failed[0].error, "err", 6000);
+    if (r.deleted.length) toast(`已移到回收站：${r.deleted.map(d => d.name).join("、")}`, "ok");
+    if (list.some(e => e.path === F.sel)) { F.sel = null; fileEmpty("选择左边的文件预览", "eye"); $("fbody").classList.remove("viewing"); }
+    await openDir(F.path);
+  } catch (err) { toast(err.message, "err"); }
+}
+
+// 同名文件怎么办：覆盖 / 保留两份 / 跳过，可以勾“后面都这样”
+function askConflict(name) {
+  return new Promise(resolve => {
+    let done = false;
+    const pick = mode => () => { done = true; resolve({ mode, all: $("dlgBody").querySelector("#cfAll")?.checked }); };
+    dialog("有同名文件", `<p style="margin:0 0 10px">这个文件夹里已经有 <b>${esc(name)}</b> 了。</p>
+      <p class="muted" style="font-size:13px;margin:0 0 10px">选“覆盖”的话，旧文件会放进回收站，30 天内可以找回。</p>
+      <label class="switch"><input type="checkbox" id="cfAll"><span class="sw"></span>后面再遇到同名文件也这样处理</label>`,
+      [{ label: "跳过", onClick: pick("skip") }, { label: "保留两份", onClick: pick("rename") }, { label: "覆盖", primary: true, onClick: pick("overwrite") }]);
+    const timer = setInterval(() => {
+      if (!$("dlgBox").classList.contains("show")) { clearInterval(timer); if (!done) resolve({ mode: "skip", all: true }); }
+    }, 200);
+  });
+}
+
+function progress(done, total, text) {
+  $("fprog").hidden = total === 0;
+  $("fprogBar").style.width = total ? Math.round(done / total * 100) + "%" : "0";
+  $("fprogText").textContent = text || "";
+}
+
+// 把本机文件上传到文件库当前打开的文件夹；files: [{file, rel}]
+async function uploadToLibrary(files) {
+  if (!files.length || !F.writable) return;
+  const dir = F.path, total = files.reduce((n, f) => n + f.file.size, 0);
+  let sent = 0, ok = 0, skipped = 0, policy = null;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    progress(sent, total, `正在上传 ${i + 1}/${files.length}：${f.rel}`);
+    let mode = policy || "ask";
+    for (;;) {
+      const r = await fetch(`/api/files/upload?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(f.rel)}&on_conflict=${mode}`,
+        { method: "PUT", body: f.file, headers: { Authorization: "Bearer " + token } });
+      if (r.ok) { ok++; break; }
+      const data = await r.json().catch(() => ({}));
+      let info = null;
+      try { info = JSON.parse(data.detail); } catch {}
+      if (r.status === 409 && info && info.exists) {
+        progress(sent, total, `等你决定：${info.name}`);
+        const c = await askConflict(info.name);
+        if (c.all) policy = c.mode;
+        if (c.mode === "skip") { skipped++; break; }
+        mode = c.mode;
+        continue;
+      }
+      toast(`${f.rel} 上传失败：${data.detail || r.status}`, "err", 6000);
+      break;
+    }
+    sent += f.file.size;
+  }
+  progress(0, 0);
+  toast(`已上传 ${ok} 个文件${skipped ? `，跳过 ${skipped} 个` : ""}`, "ok");
+  if (F.path === dir) openDir(dir);
+}
+
+async function openTrash() {
+  let d;
+  try { d = await api("/api/trash"); } catch (e) { return toast(e.message, "err"); }
+  const admin = me.role === "admin";
+  const body = dialog("回收站", d.items.length ? `
+    <p class="muted" style="margin:0 0 6px;font-size:13px">删除的文件会在这里保留 ${d.days} 天。${admin ? "你是管理员，能看到所有人删除的文件。" : "这里只有你自己删除的文件。"}</p>
+    ${d.items.map((t, i) => `<div class="trash-row" style="animation-delay:${Math.min(i, 20) * 25}ms">
+      ${fileBadge({ name: t.name, dir: !!t.is_dir })}
+      <div class="tn"><b>${esc(t.name)}</b><small title="${esc(t.orig_path)}">原来在 ${esc(shortPath(t.orig_path))} · ${t.is_dir ? "文件夹" : fsize(t.size)}</small>
+        <small>${admin ? esc(t.who || "") + " · " : ""}${ftime(t.deleted_at)}${t.reason && t.reason !== "删除" ? " · " + esc(t.reason) : ""} · 还剩 ${t.days_left} 天</small></div>
+      <button class="btn small" data-restore="${t.id}">${icon("history", 13)}恢复</button>
+      ${admin ? `<button class="iconbtn" data-purge="${t.id}" title="彻底删除">${icon("x", 15)}</button>` : ""}
+    </div>`).join("")}` : `<div style="text-align:center;padding:24px 0">${orb(48)}<p class="muted">回收站是空的。</p></div>`, [], true);
+  body.onclick = async e => {
+    const rs = e.target.closest("[data-restore]"), pg = e.target.closest("[data-purge]");
+    try {
+      if (rs) {
+        const r = await post(`/api/trash/${rs.dataset.restore}/restore`);
+        toast(r.renamed ? `已恢复（原位置有同名文件，改名为 ${baseName(r.restored)}）` : "已恢复到原来的位置", "ok", 4000);
+        if ($("filesBox").classList.contains("show")) openDir(F.path);
+        openTrash();
+      } else if (pg) {
+        if (!confirm("彻底删除后就找不回来了，确定吗？")) return;
+        await api(`/api/trash/${pg.dataset.purge}`, { method: "DELETE" });
+        openTrash();
+      }
+    } catch (err) { toast(err.message, "err"); }
+  };
+}
+
+$("fUpFile").onclick = () => $("fUpIn").click();
+$("fUpDir").onclick = () => $("fUpDirIn").click();
+$("fMkdir").onclick = mkdirHere;
+$("fTrash").onclick = openTrash;
+$("fren").onclick = () => F.selEntry && renameEntry(F.selEntry);
+$("fdel").onclick = () => F.selEntry && deleteEntries([F.selEntry]);
+$("fUpIn").onchange = e => { const fs = [...e.target.files].map(f => ({ file: f, rel: f.name })); e.target.value = ""; uploadToLibrary(fs); };
+$("fUpDirIn").onchange = e => {
+  const fs = [...e.target.files].map(f => ({ file: f, rel: f.webkitRelativePath || f.name }));  // 保留最外层文件夹名
+  e.target.value = ""; uploadToLibrary(fs);
+};
 
 // 把回复里提到的文件库、工作区路径变成可点的链接
 function linkifyPaths(container) {
@@ -991,6 +1151,9 @@ async function openLocal() {
 $("areas").onclick = e => { const b = e.target.closest("[data-area]"); if (b) openDir(b.dataset.area); };
 $("crumbs").onclick = e => { if (e.target.dataset.go !== undefined) openDir(e.target.dataset.go); };
 $("flist").onclick = e => {
+  const ren = e.target.closest("[data-ren]"), del = e.target.closest("[data-delf]");
+  if (ren) { e.stopPropagation(); return renameEntry(F.entries[+ren.dataset.ren]); }
+  if (del) { e.stopPropagation(); return deleteEntries([F.entries[+del.dataset.delf]]); }
   const row = e.target.closest(".fi");
   if (!row) return;
   const en = F.entries[+row.dataset.i];
@@ -1203,6 +1366,7 @@ function paletteActions() {
     ["upload", "提交新技能", "", () => loadSkills().then(openMySkills)],
     ["user", "更换头像", "", pickAvatar],
     ["phone", "在手机上打开", "", () => showMobile()],
+    ["trash", "回收站", "", () => openTrash()],
     [store.get("theme") === "dark" ? "sun" : "moon", "切换主题", "", () => { $("userMenu").hidden = true; const o = ["auto", "light", "dark"], c = store.get("theme") || "auto", n = o[(o.indexOf(c) + 1) % 3]; store.set("theme", n); applyTheme(n); toast("主题：" + THEMES[n][0]); }],
     ["key", "修改密码", "", changePassword],
   ];
