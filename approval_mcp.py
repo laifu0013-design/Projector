@@ -4,6 +4,8 @@
   本脚本把请求转给中心服务，等网页端或语音里有人同意/拒绝后再返回。
 - skill_list / skill_checkout / skill_submit：在聊天里查看、修改、提交技能（提交后要管理员审核才生效）。
 - ask_user：弹出选项卡片让用户点选（像 Claude 桌面端那样），等用户回答后返回。
+- kb_search / kb_read / kb_write：查、读、写团队知识库（D:\\知识库）。
+- read_document：把 Word、Excel、PPT、PDF 转成文字。
 """
 import json
 import logging
@@ -89,6 +91,90 @@ async def ask_user(questions: list[Question]) -> str:
     except Exception as e:  # noqa: BLE001
         log.error("[%s] 提问失败：%r", CENTER_SESSION, e)
         return f"没能弹出问题（{type(e).__name__}），请直接在回答里问用户。"
+
+
+_STATE = {"changed": "⚠ 原文件在卡片写完后改过，内容可能过时", "missing": "⚠ 原文件已经不在了"}
+
+
+@mcp.tool()
+async def kb_search(query: str, limit: int = 8) -> str:
+    """在团队知识库里搜索：经验（以前怎么做的）、文件卡片（重要文件的摘要和位置）、主题（项目、客户等）。
+    query 用空格分开几个关键词，比如“退货 流程”“客户A 合同”。
+    遇到和公司业务、项目、客户、以前做过的事有关的问题，或要在文件库里找资料时，先用它查一下。"""
+    try:
+        d = await _post("/api/internal/kb/search", {"query": query, "limit": limit})
+    except Exception as e:
+        return f"出错了：{e}"
+    if not d["results"]:
+        return f"知识库里没有找到和“{query}”相关的笔记（知识库在 {d['root']}）。可以换个说法再搜，或者直接去文件库找。"
+    lines = []
+    for r in d["results"]:
+        head = f"- [[{r['title']}]]（{r['type']}"
+        head += f"，{r['status']}" if r["status"] != "有效" else ""
+        head += f"，{r['updated']} {r['author']}）" if r["author"] else "）"
+        lines.append(head)
+        if r["summary"]:
+            lines.append(f"  摘要：{r['summary']}")
+        if r["source"]:
+            lines.append(f"  原文件：{r['source']}" + (f" {_STATE[r['source_state']]}" if r["source_state"] else ""))
+        if r["snippet"]:
+            lines.append(f"  片段：{r['snippet']}")
+    return "\n".join(lines) + "\n\n用 kb_read 读完整内容；文件卡片里写的原文件可以直接去读。"
+
+
+@mcp.tool()
+async def kb_read(name: str) -> str:
+    """读一条知识库笔记的完整内容（name 用笔记标题，也就是 [[ ]] 里的名字）。会同时列出哪些笔记链接到了它。"""
+    try:
+        d = await _post("/api/internal/kb/read", {"name": name})
+    except Exception as e:
+        return f"出错了：{e}"
+    tail = []
+    if d["backlinks"]:
+        tail.append("链接到这条的笔记：" + "、".join(f"[[{b}]]" for b in d["backlinks"]))
+    if d["missing_links"]:
+        tail.append("还没建的链接：" + "、".join(f"[[{b}]]" for b in d["missing_links"]))
+    if d["source_state"]:
+        tail.append(_STATE[d["source_state"]] + "，必要时重新读原文件并更新这张卡片")
+    return f"文件：{d['abs']}\n\n{d['content']}" + ("\n\n" + "\n".join(tail) if tail else "")
+
+
+@mcp.tool()
+async def kb_write(title: str, content: str, type: str = "经验", tags: list[str] | None = None,
+                   summary: str = "", source: str = "", mode: str = "create") -> str:
+    """新建或修改知识库笔记（只有用户要求沉淀经验、整理文件进知识库、或明确让你记下来时才写）。
+    title：标题，就是文件名和 [[链接]] 名，写成以后别人会搜的样子；
+    content：Markdown 正文（不用写开头的 --- 属性，作者、日期会自动补上）；提到项目、客户、供应商、产品、人名时用 [[名字]] 链接；
+    type：经验 / 文件卡片 / 主题；tags：几个标签；summary：一句话摘要；
+    source：文件卡片对应的原文件或文件夹的完整路径（用来提醒原文件改过）；
+    mode：create 新建（同名已存在会报错，防止重复）/ update 整体改写（先 kb_read，保留有用的旧内容）/ append 在末尾追加一段。
+    不要写进密码、身份证号、银行卡号。"""
+    body = {"title": title, "content": content, "type": type, "mode": mode,
+            "tags": tags or None, "summary": summary or None, "source": source or None}
+    try:
+        d = await _post("/api/internal/kb/write", body)
+    except Exception as e:
+        return f"没写成：{e}"
+    msg = f"已{'新建' if d['created'] else '更新'}笔记 [[{d['title']}]]：{d['abs']}"
+    if d["missing_links"]:
+        msg += ("\n其中这些链接还没有对应的笔记：" + "、".join(f"[[{x}]]" for x in d["missing_links"])
+                + "。如果是被多处提到的重要主题（项目、客户等），可以建一条 type=主题 的笔记；不重要的可以不管。")
+    return msg
+
+
+@mcp.tool()
+async def read_document(path: str, offset: int = 0) -> str:
+    """把 Word（docx/doc/wps）、Excel（xlsx/xls/et）、PPT（pptx/ppt）、PDF 或文本文件转成文字读出来。
+    path：文件完整路径。内容很长时分段返回，按提示用 offset 继续读。"""
+    try:
+        d = await _post("/api/internal/kb/doc", {"path": path, "offset": offset}, timeout=240)
+    except Exception as e:
+        return f"读不了：{e}"
+    text = d["text"] or "（这个文件里没有读到文字）"
+    if d["more"] or d["start"]:
+        text += f"\n\n（共 {d['total']} 字，这是第 {d['start']}~{d['end']} 字" + \
+                (f"；继续读用 offset={d['end']}）" if d["more"] else "）")
+    return text
 
 
 @mcp.tool()

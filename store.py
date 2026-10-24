@@ -34,6 +34,15 @@ else:
 WS_ROOT.mkdir(parents=True, exist_ok=True)
 WS_ROOT = WS_ROOT.resolve()
 TRASH = WS_ROOT / "回收站"
+# 团队知识库：一堆 Markdown 笔记（Obsidian 格式），默认放在 D:\知识库，大家都能看、Claude 帮忙维护
+if os.environ.get("KB_ROOT"):
+    KB_ROOT = Path(os.environ["KB_ROOT"])
+elif FILE_ROOT.is_dir():
+    KB_ROOT = FILE_ROOT / "知识库"
+else:
+    KB_ROOT = DATA / "kb"
+KB_ROOT.mkdir(parents=True, exist_ok=True)
+KB_ROOT = KB_ROOT.resolve()
 TRASH_DAYS = 30
 LIBRARY = (DATA / "skills" / "library").resolve()
 SUBMISSIONS = (DATA / "skills" / "submissions").resolve()

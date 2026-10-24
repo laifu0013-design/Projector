@@ -252,7 +252,7 @@
 
   async function renderFileOps() {
     const ops = await api("/api/admin/file-ops");
-    const color = { 上传: "approved", 覆盖上传: "pending", 新建文件夹: "approved", 改名: "pending", 删除: "rejected", 恢复: "approved", 彻底删除: "rejected" };
+    const color = { 上传: "approved", 覆盖上传: "pending", 新建文件夹: "approved", 改名: "pending", 删除: "rejected", 恢复: "approved", 彻底删除: "rejected", 知识库新建: "approved", 知识库修改: "pending", 知识库改名: "pending", 知识库删除: "rejected" };
     box().innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
         <div class="muted" style="font-size:13px;flex:1">在文件库里上传、新建、改名、删除、恢复的操作都会记在这里（最近 300 条）。删除的文件在回收站里保留 30 天。</div>

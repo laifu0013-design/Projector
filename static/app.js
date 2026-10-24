@@ -42,6 +42,7 @@ function api(path, opts = {}) {
 const post = (path, body, method = "POST") => api(path, { method, body: JSON.stringify(body || {}) });
 
 function md(text) {
+  if (window.kbLinkify) text = kbLinkify(text);  // [[笔记名]] → 可以点开的知识库链接
   if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(text || ""));
   return `<div style="white-space:pre-wrap">${esc(text)}</div>`;
 }
@@ -121,6 +122,8 @@ function paintStatic() {
   $("fTrash").innerHTML = icon("trash", 14) + "回收站";
   $("fren").innerHTML = icon("edit", 16);
   $("fdel").innerHTML = icon("trash", 16);
+  $("fkb").innerHTML = icon("book", 14) + "整理进知识库";
+  $("fKbDir").innerHTML = icon("book", 14) + "整理进知识库";
   $("palIcon").innerHTML = icon("search", 18);
   document.querySelectorAll(".closebtn").forEach(b => b.innerHTML = icon("x"));
   // 登录页：橙光球外面两圈慢慢转动的水果头像
@@ -135,7 +138,7 @@ paintStatic();
 
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => b.closest(".overlay").classList.remove("show"));
 document.querySelectorAll(".overlay").forEach(o => o.addEventListener("mousedown", e => {
-  if (e.target === o && o.id !== "login") o.classList.remove("show");
+  if (e.target === o && o.id !== "login" && o.id !== "kbBox") o.classList.remove("show");
 }));
 
 // ---------- 登录 ----------
@@ -199,6 +202,7 @@ function enter(user) {
   resetComposer();
   connect();
   loadSkills().then(() => { if (!messages.length && !live) renderMessages(true); });
+  window.kbInit?.();
   renderSessions();
   renderMessages();
 }
@@ -350,6 +354,9 @@ const TOOL_META = {
   Read: ["读取", "book"], Glob: ["查找文件", "search"], Grep: ["搜索内容", "search"], Edit: ["修改", "edit"], MultiEdit: ["修改", "edit"],
   Write: ["写入", "file"], Bash: ["运行命令", "terminal"], WebFetch: ["打开网页", "globe"], Skill: ["使用技能", "puzzle"],
   Task: ["子任务", "bolt"], TodoWrite: ["列计划", "steps"], NotebookEdit: ["修改笔记本", "edit"],
+  mcp__center__kb_search: ["查知识库", "book"], mcp__center__kb_read: ["读笔记", "book"], mcp__center__kb_write: ["写进知识库", "book"],
+  mcp__center__read_document: ["读文档", "file"], mcp__center__ask_user: ["问你", "chat"],
+  mcp__center__skill_list: ["查技能", "puzzle"], mcp__center__skill_checkout: ["取出技能", "puzzle"], mcp__center__skill_submit: ["提交技能", "puzzle"],
 };
 // 把文件库、工作区下的完整路径缩短成“文件库/…”“工作区/…”
 function shortPath(p) {
@@ -385,8 +392,10 @@ function stepsLive(tools, waiting) {
 function chipsHtml(meta) {
   const refs = (meta && meta.refs) || [];
   const skill = meta && meta.skill;
-  if (!refs.length && !skill) return "";
-  return '<div class="chips">' + (skill ? `<span class="chip skill">${icon("puzzle", 12)}<span>${esc(skill)}</span></span>` : "") +
+  const kbAct = meta && meta.kb;
+  if (!refs.length && !skill && !kbAct) return "";
+  return '<div class="chips">' + (kbAct ? `<span class="chip kbc">${icon("book", 12)}<span>知识库</span></span>` : "") +
+    (skill ? `<span class="chip skill">${icon("puzzle", 12)}<span>${esc(skill)}</span></span>` : "") +
     refs.map(r => `<span class="chip ref" data-fpath="${esc(r)}" title="${esc(r)}">${icon("clip", 12)}<span>${esc(baseName(r))}</span></span>`).join("") + "</div>";
 }
 
@@ -422,7 +431,10 @@ function renderMessages(force = false) {
     return;
   }
   const ownerAva = currentSess ? currentSess.owner_avatar : me.avatar;
-  let html = messages.map(m => {
+  // 最后一条 Claude 回答下面放“沉淀成经验”（自己的会话、没在运行时）
+  const lastAi = isMine() && !live && !(currentSess && currentSess.running) && currentSess && currentSess.claude_session
+    ? messages.map(m => m.role).lastIndexOf("assistant") : -1;
+  let html = messages.map((m, mi) => {
     const meta = m.meta || {};
     const isNew = !seen.has(m.id) ? " new" : "";
     if (m.role === "user") {
@@ -442,7 +454,8 @@ function renderMessages(force = false) {
     }
     const info = [meta.seconds != null ? meta.seconds + " 秒" : "", meta.cost ? "$" + meta.cost.toFixed(4) : ""].filter(Boolean).join(" · ");
     const body = m.role === "error" ? `<div class="errbox">${icon("alert", 17)}<div>${esc(m.content)}</div></div>` : `<div class="md">${md(m.content)}</div>`;
-    return `<div class="msg ai${isNew}">${aiHead(m.created)}<div class="ai-body">${stepsDone(meta.tools)}${body}${info ? `<div class="meta" style="margin-top:8px">${info}</div>` : ""}</div></div>`;
+    const acts = mi === lastAi ? `<div class="ai-acts"><button class="aact" data-distill title="Claude 会把这次的做法整理成一条经验笔记，存进团队知识库">${icon("book", 14)}沉淀成经验</button></div>` : "";
+    return `<div class="msg ai${isNew}">${aiHead(m.created)}<div class="ai-body">${stepsDone(meta.tools)}${body}${info || acts ? `<div class="ai-foot">${info ? `<span class="meta">${info}</span>` : ""}${acts}</div>` : ""}</div></div>`;
   }).join("");
   if (live) {
     const waiting = approvals.length > 0 || questions.length > 0;
@@ -479,6 +492,7 @@ function approvalDetail(a) {
 }
 
 $("list").addEventListener("click", e => {
+  if (e.target.closest("[data-distill]")) { e.target.closest("[data-distill]").disabled = true; return window.kbDistill(); }
   const card = e.target.closest(".w-card");
   if (card) {
     const act = card.dataset.act;
@@ -1025,6 +1039,7 @@ async function preview(e) {
   $("fref").hidden = !isMine();
   $("flocal").hidden = !IS_DESKTOP;
   $("fren").hidden = $("fdel").hidden = !(F.writable && F.mode === "browse");
+  $("fkb").hidden = F.mode !== "browse" || !!(window.kbRelOf && kbRelOf(e.abs));
   const box = $("fcontent");
   const kind = kindOf(e.name);
   const url = fileUrl(e.path);
@@ -1074,6 +1089,7 @@ async function preview(e) {
   // 图片、视频、音频格式浏览器不支持时（比如 HEIC、TIFF、部分视频编码）
   const media = box.querySelector("img, video, audio");
   if (media) media.onerror = () => { if (F.sel === e.path) cannot("这个文件的格式或编码这里放不了。"); };
+  window.kbFileBanner?.(e);
 }
 
 function showFiles(path = null, mode = "browse") {
@@ -1096,6 +1112,8 @@ function paintFileTools() {
   const w = F.writable;
   for (const id of ["fUpFile", "fUpDir", "fMkdir"]) $(id).disabled = !w;
   $("fRO").hidden = w;
+  // 整个文件库太大，不能一次整理；知识库自己也不用整理
+  $("fKbDir").hidden = !F.path || F.path === "ws:" || !!(window.kbRelOf && kbRoot() && F.abs.replaceAll("\\", "/").toLowerCase().startsWith(kbRoot().replaceAll("\\", "/").toLowerCase()));
   $("fRO").textContent = "这个位置只能看，不能修改";
 }
 
@@ -1223,6 +1241,8 @@ $("fMkdir").onclick = mkdirHere;
 $("fTrash").onclick = openTrash;
 $("fren").onclick = () => F.selEntry && renameEntry(F.selEntry);
 $("fdel").onclick = () => F.selEntry && deleteEntries([F.selEntry]);
+$("fkb").onclick = () => F.selEntry && window.kbOrganize([F.selEntry.path], F.selEntry.name);
+$("fKbDir").onclick = () => window.kbOrganize([F.path], baseName(F.abs));
 $("fUpIn").onchange = e => { const fs = [...e.target.files].map(f => ({ file: f, rel: f.name })); e.target.value = ""; uploadToLibrary(fs); };
 $("fUpDirIn").onchange = e => {
   const fs = [...e.target.files].map(f => ({ file: f, rel: f.webkitRelativePath || f.name }));  // 保留最外层文件夹名
@@ -1483,6 +1503,7 @@ function paletteActions() {
   const acts = [
     ["plus", "新会话", "", () => { resetComposer(); openSession(null); }],
     ["folder", "打开文件库", "", () => showFiles()],
+    ["book", "打开知识库", "", () => window.openKB()],
     ["clip", "引用文件到对话", "@", () => showFiles()],
     ["laptop", "把本机文件交给 Claude", "", () => $("localBtn").click()],
     ["puzzle", "选择技能", "", () => openSkillPop()],
@@ -1495,6 +1516,7 @@ function paletteActions() {
   ];
   if (me.role === "admin") acts.push(["shield", "打开管理后台", "", () => window.openAdmin()]);
   if (current) acts.splice(1, 0, ["steps", "查看完整过程", "", showSteps]);
+  if (current && isMine() && currentSess && currentSess.claude_session) acts.splice(2, 0, ["book", "沉淀经验：把这次对话存进知识库", "", window.kbDistill]);
   return acts;
 }
 function renderPalette() {
@@ -1543,8 +1565,10 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (e.key !== "Escape") return;
-  for (const id of ["palette", "dlgBox", "filesBox", "stepsBox", "adminBox"]) {
-    if ($(id).classList.contains("show")) { $(id).classList.remove("show"); return; }
+  for (const id of ["palette", "dlgBox", "filesBox", "kbBox", "stepsBox", "adminBox"]) {
+    if (!$(id).classList.contains("show")) continue;
+    if (id === "kbBox") window.kbBeforeClose(); else $(id).classList.remove("show");
+    return;
   }
   $("skillPop").hidden = true; $("userMenu").hidden = true;
 });

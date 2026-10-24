@@ -23,14 +23,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import files_api
+import kb
 import skills_api
-from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, PORT, TRASH, WS_ROOT,
+from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, KB_ROOT, PORT, TRASH, WS_ROOT,
                    user_ws_dir,
                    adopt_orphans, avatar_of, get_setting, set_setting, board_user, check_password, current_user, db, find_claude, first_admin,
                    get_user, hash_password, is_admin, is_local, issue_token, jdump, posix_rule_path,
                    require_admin, require_internal, session_for, session_workspace, user_public)
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 LOGS = DATA / "logs"
 LOGS.mkdir(exist_ok=True)
 TASK_TIMEOUT = float(os.environ.get("CLAUDE_TASK_TIMEOUT", "3600"))
@@ -46,7 +47,9 @@ SAFE_BASH = [
 EDIT_TOOLS = ["Edit", "Write"]
 # 技能工具：提交的技能要管理员审核才生效，所以自动放行
 SKILL_TOOLS = ["mcp__center__skill_list", "mcp__center__skill_checkout", "mcp__center__skill_submit",
-               "mcp__center__ask_user"]  # ask_user：弹出选项让用户点选
+               "mcp__center__ask_user",  # ask_user：弹出选项让用户点选
+               # 知识库：写入会留历史版本、可以恢复；read_document 只读
+               "mcp__center__kb_search", "mcp__center__kb_read", "mcp__center__kb_write", "mcp__center__read_document"]
 DEFAULT_BASH_ALLOW = ["python", "py", "pip", "unzip", "tar"]  # 严格档下额外自动放行的命令
 # 标准档下仍要确认的危险命令（删除、移动、格式化、改系统、强制推送等）
 DEFAULT_ASK_CMDS = ["rm", "rmdir", "del", "erase", "rd", "mv", "move", "Remove-Item", "ri", "Move-Item",
@@ -80,6 +83,12 @@ WEB_HINT = (
     "需要用户在几个方案里做选择、或确认关键信息时，调用 ask_user 弹出选项让用户点选："
     "一次最多 4 个问题，每题 2~4 个选项，推荐的选项放第一个并在 label 末尾加“（推荐）”；"
     "不要在回答里列出选项等用户打字回复，也不要为显而易见的事情提问。"
+    "团队知识库在 {kb}：经验（以前怎么做的）、文件卡片（重要文件的摘要和位置）、主题（项目、客户等）。"
+    "问题涉及公司业务、项目、客户、以前做过的事，或者要在文件库里找资料时，先用 kb_search 查一下，"
+    "查到的文件卡片里有原文件路径，可以直接去读；回答里提到知识库笔记时写成 [[笔记名]]，用户能点开。"
+    "知识库只能用 kb_write 修改（会自动记作者和历史），用户没要求时不要往里写；"
+    "做完一件费了功夫、以后还会用到的事，可以在回答末尾提一句“可以点‘沉淀经验’把这次的做法存进知识库”。"
+    "读 Word、Excel、PPT、PDF 的内容用 read_document。"
     "用户想新建或修改团队技能（skill）时：先用 skill_checkout 取出（新建时 name 留空拿到草稿文件夹），"
     "在工作区里改好，再用 skill_submit 提交并写清更新说明；提交后要管理员审核才生效，不要直接改技能库或插件目录。"
     "这台电脑是 Windows，命令通过 Git Bash 执行：python 不能用时试 py；没有 unzip 时用 tar -xf 文件.zip 或 "
@@ -90,11 +99,44 @@ VOICE_HINT = (
     "你的最终回答会显示在小屏幕上并被朗读：用中文给出 150 字以内的结论，"
     "不要用 Markdown 表格、代码块或长列表。较长的内容写进文件，只告诉用户路径。"
     "修改文件和执行命令需要用户口头确认，尽量把需要确认的操作合并成一次；被拒绝时不要重试同样的操作。"
+    "团队知识库（{kb}）里有以前的经验和重要文件的卡片，涉及公司业务或找资料时先用 kb_search 查。"
+    "读 Word、Excel、PPT、PDF 用 read_document。"
 )
+
+# 聊天里的两个快捷动作：给 Claude 的完整指令；用户看到的是简短的一句
+KB_ACTIONS = {
+    "distill": (
+        "把这次对话沉淀成团队经验",
+        "【沉淀经验】请把这次对话里值得团队以后复用的经验，整理进团队知识库：\n"
+        "1. 先用 kb_search 查有没有相关的经验笔记：有就 kb_read 后用 kb_write 的 mode=update 合并进去（保留原来有用的内容），"
+        "没有再新建（type=经验）。一条经验只讲一件事，内容多就拆成几条。\n"
+        "2. 标题写成以后别人会搜的样子，比如“供应商对账单的核对方法”；summary 用一句话说清楚这条经验解决什么问题。\n"
+        "3. 正文用这几节：## 什么时候用（遇到什么情况）／## 做法（步骤，具体到文件夹、工具、命令、技能）／"
+        "## 用到的文件（完整路径）／## 注意（踩过的坑、容易出错的地方）。\n"
+        "4. 提到的项目、客户、供应商、产品、部门、人名用 [[名字]] 链接；重要文件已有文件卡片的，链接到卡片。\n"
+        "5. 不要写进密码、身份证号、银行卡号这类敏感信息，也不要照抄大段原文。\n"
+        "6. 如果这次对话没有值得沉淀的内容，直接告诉我，不要硬写。\n"
+        "写完用一两句话告诉我存了哪几条，笔记名写成 [[笔记名]]。"),
+    "organize": (
+        "把「{name}」整理进知识库",
+        "【整理进知识库】请为上面引用的文件或文件夹制作“文件卡片”，存进团队知识库，方便以后快速找到和理解：\n"
+        "1. 先用 kb_search 看是否已有这些文件的卡片：有就更新（原文件改过的按新内容改），没有就新建（type=文件卡片，"
+        "source 填原文件或文件夹的完整路径）。卡片标题用能看懂的名字，比如“2026 年 3 月 客户A 采购合同”，不要只写文件名。\n"
+        "2. 文件夹：先看整体结构，为文件夹本身写一张卡片（放了什么、怎么组织、重要文件有哪些）；"
+        "再为里面重要的文件（合同、报价、方案、制度、汇总表、报告等）各写一张。临时文件、重复的旧版本、图片素材不用单独写。"
+        "重要文件超过 30 个时先做最重要的 30 个，并在文件夹卡片里说明还有哪些没做。\n"
+        "3. 读 Word、Excel、PPT、PDF 用 read_document。\n"
+        "4. 每张卡片：summary 一句话说明这是什么；正文用 ## 概要／## 关键信息（金额、日期、对方、编号、结论等，用列表）／## 相关。\n"
+        "5. 提到的项目、客户、供应商、产品、人名用 [[名字]] 链接；某个名字被好几张卡片提到、又还没有笔记时，"
+        "建一条 type=主题 的笔记，简单介绍并列出相关卡片。\n"
+        "6. 不要抄录全文，不要写进身份证号、银行卡号、密码。\n"
+        "完成后告诉我做了几张卡片、建了哪些主题，笔记名写成 [[笔记名]]。"),
+}
 
 app = FastAPI()
 app.include_router(files_api.router)
 app.include_router(skills_api.router)
+app.include_router(kb.router)
 
 
 # ---------- 会话 ----------
@@ -195,7 +237,7 @@ def resolve_approval(aid: str, allow: bool, by: str = "", message: str = "") -> 
 # ---------- 调用 Claude Code（以后换别的 agent 工具，只改这一段） ----------
 
 def _tool_detail(args: dict) -> str:
-    for key in ("file_path", "path", "pattern", "url", "command", "skill"):
+    for key in ("file_path", "path", "pattern", "url", "command", "skill", "query", "title", "name"):
         if args.get(key):
             return str(args[key])[:200]
     return ""
@@ -212,7 +254,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 def _hint_file(sess: dict, owner: dict) -> Path:
-    hint = VOICE_HINT if sess["source"] == "voice" else WEB_HINT.format(user=owner["display_name"])
+    hint = (VOICE_HINT if sess["source"] == "voice" else WEB_HINT).format(user=owner["display_name"], kb=KB_ROOT)
     path = DATA / "mcp" / f"hint_{sess['id']}.txt"
     path.write_text(hint, encoding="utf-8")
     return path
@@ -227,6 +269,9 @@ def _deny_rules(owner: dict) -> list[str]:
     for p in paths:
         pat = posix_rule_path(p) + ("/**" if p.suffix == "" else "")
         rules += [f"Read({pat})", f"Edit({pat})", f"Write({pat})"]
+    # 知识库可以读，但只能通过 kb_write 改（这样才有作者和历史记录）
+    kbp = posix_rule_path(KB_ROOT) + "/**"
+    rules += [f"Edit({kbp})", f"Write({kbp})"]
     return rules
 
 
@@ -387,7 +432,8 @@ def build_prompt(text: str, refs: list[str], skill: str) -> str:
     return ("\n\n".join(head) + "\n\n" + text) if head else text
 
 
-async def start_turn(sess: dict, text: str, author: dict, refs: list[str] | None = None, skill: str = "") -> Run:
+async def start_turn(sess: dict, text: str, author: dict, refs: list[str] | None = None, skill: str = "",
+                     action: str = "") -> Run:
     claude_bin = find_claude()
     if not claude_bin:
         raise HTTPException(500, "台式机上找不到 claude 命令：请先安装 Claude Code，或在 config.bat 里设置 CLAUDE_BIN")
@@ -400,7 +446,7 @@ async def start_turn(sess: dict, text: str, author: dict, refs: list[str] | None
     if not Path(cwd).is_dir():
         raise HTTPException(400, f"工作文件夹不存在：{cwd}")
     ws = session_workspace(sess, create=False)  # 工作区用到时才建，免得 D 盘里堆满空文件夹
-    extra = [ws] if ws and ws.exists() else []
+    extra = ([ws] if ws and ws.exists() else []) + [KB_ROOT]
     for r in refs:
         p = Path(r)
         extra.append(p if p.is_dir() else p.parent)
@@ -410,9 +456,12 @@ async def start_turn(sess: dict, text: str, author: dict, refs: list[str] | None
         meta["refs"] = refs
     if skill:
         meta["skill"] = skill
+    if action:
+        meta["kb"] = action
     add_message(sid, "user", text, meta)
     cmd = build_command(claude_bin, sess, owner, extra)
-    asyncio.create_task(_drive(run, build_prompt(text, refs, skill), cmd, cwd))
+    prompt = build_prompt(KB_ACTIONS[action][1] if action else text, refs, skill)
+    asyncio.create_task(_drive(run, prompt, cmd, cwd))
     return run
 
 
@@ -733,9 +782,10 @@ class UpdateSession(BaseModel):
 
 
 class Send(BaseModel):
-    text: str
+    text: str = ""
     refs: list[str] = []
     skill: str = ""
+    action: str = ""   # distill 沉淀经验 / organize 整理进知识库
 
 
 class ApprovalRequest(BaseModel):
@@ -849,15 +899,23 @@ async def send_message(sid: str, body: Send, user: dict = Depends(current_user))
     s = session_for(sid, user)
     _owner_only(s, user)
     text = body.text.strip()
+    refs = [str(files_api.resolve_path(r, user)) for r in body.refs[:30]]
+    if body.action:
+        if body.action not in KB_ACTIONS:
+            raise HTTPException(400, "不支持的操作")
+        if body.action == "organize" and not refs:
+            raise HTTPException(400, "请先选要整理的文件或文件夹")
+        if body.action == "distill" and not s["claude_session"]:
+            raise HTTPException(400, "这个会话还没有内容可以沉淀")
+        text = KB_ACTIONS[body.action][0].format(name="、".join(Path(r).name for r in refs[:3]) + ("等" if len(refs) > 3 else ""))
     if not text:
         raise HTTPException(400, "内容为空")
-    refs = [str(files_api.resolve_path(r, user)) for r in body.refs[:30]]
     skill = body.skill.strip()
     if skill and skill not in skills_api.user_skill_names(user):
         raise HTTPException(403, "你没有这个技能的使用权限")
     if s["title"] == "新会话":
         db("UPDATE sessions SET title=? WHERE id=?", (text[:20], sid))
-    await start_turn(s, text, user, refs, skill)
+    await start_turn(s, text, user, refs, skill, body.action)
     return {"ok": True}
 
 
@@ -1163,6 +1221,7 @@ def main() -> None:
     if not first_admin():
         print(f"  还没有管理员：请在本机浏览器打开 http://localhost:{PORT} 创建")
     print(f"  工作目录 {FILE_ROOT}")
+    print(f"  知识库 {KB_ROOT}")
     print(f"  claude：{claude_bin or '没找到！请安装 Claude Code，或在 config.bat 里设置 CLAUDE_BIN'}")
     print(f"  Office 预览：{files_api.SOFFICE or '没装 LibreOffice，PPT 等只能用本机程序打开'}")
     threading.Thread(target=discovery_responder, daemon=True).start()
