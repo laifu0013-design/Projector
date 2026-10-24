@@ -29,7 +29,7 @@ from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, 
                    get_user, hash_password, is_admin, is_local, issue_token, jdump, posix_rule_path,
                    require_admin, require_internal, session_for, session_workspace, user_public)
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 TASK_TIMEOUT = float(os.environ.get("CLAUDE_TASK_TIMEOUT", "3600"))
 APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT", "1800"))
 
