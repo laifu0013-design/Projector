@@ -72,4 +72,5 @@ echo 安装完成。下一步：
 echo   1. 双击 start.bat 启动；第一次运行防火墙弹窗时选 "允许"（专用网络）。
 echo   2. 浏览器打开 http://localhost:8080 ，访问密码在服务窗口里能看到。
 echo   3. 想开机自动在后台运行，就装 Projector 桌面软件并打开 "服务端模式"。
+echo   4. 可选：装 LibreOffice（https://zh-cn.libreoffice.org），网页里就能预览 PPT、老版 Word 等文件。
 pause

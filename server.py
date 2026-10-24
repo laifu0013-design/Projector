@@ -603,6 +603,158 @@ async def events(request: Request):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# ---------- 文件浏览和预览（只读，限制在工作目录里） ----------
+
+FILE_ROOT = Path(os.environ.get("FILES_ROOT") or WORK_DIR).resolve()
+SOFFICE = os.environ.get("SOFFICE") or shutil.which("soffice") or next(
+    (p for p in (r"C:\Program Files\LibreOffice\program\soffice.exe",
+                 r"C:\Program Files (x86)\LibreOffice\program\soffice.exe") if Path(p).is_file()), None)
+HIDDEN_NAMES = {"$recycle.bin", "system volume information", "pagefile.sys", "swapfile.sys", "hiberfil.sys",
+                "dumpstack.log.tmp", "config.msi", "recovery"}
+TEXT_LIMIT = 1024 * 1024
+_soffice_lock = asyncio.Lock()
+
+
+def resolve_path(path: str) -> Path:
+    """把网页传来的路径（相对工作目录，或 D:\\xx 这样的完整路径）转成真实路径，不允许跑出工作目录。"""
+    raw = (path or "").strip().strip('"')
+    p = Path(raw)
+    target = (p if p.is_absolute() else FILE_ROOT / raw.lstrip("/\\")).resolve()
+    if target != FILE_ROOT and not target.is_relative_to(FILE_ROOT):
+        raise HTTPException(403, "只能访问工作目录里的文件")
+    if not target.exists():
+        raise HTTPException(404, "文件不存在")
+    return target
+
+
+def rel_path(p: Path) -> str:
+    return "" if p == FILE_ROOT else p.relative_to(FILE_ROOT).as_posix()
+
+
+def _hidden(entry: os.DirEntry) -> bool:
+    if entry.name.lower() in HIDDEN_NAMES or entry.name.startswith("~$"):
+        return True
+    attrs = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    return bool(attrs & 0x6)  # Windows 的隐藏、系统属性
+
+
+def list_dir(d: Path, limit: int = 3000) -> list[dict]:
+    items = []
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                try:
+                    if _hidden(e):
+                        continue
+                    st = e.stat()
+                    is_dir = e.is_dir()
+                except OSError:
+                    continue  # 没权限或已删除
+                items.append({"name": e.name, "dir": is_dir, "size": 0 if is_dir else st.st_size,
+                              "mtime": st.st_mtime, "path": rel_path(Path(e.path))})
+                if len(items) >= limit:
+                    break
+    except PermissionError:
+        raise HTTPException(403, "没有权限打开这个文件夹")
+    items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
+    return items
+
+
+@app.get("/api/files", dependencies=[Depends(auth)])
+def files_list(path: str = ""):
+    """列出文件夹；传的是文件就列出它所在的文件夹，并用 select 标出这个文件。"""
+    target = resolve_path(path)
+    select = None
+    if target.is_file():
+        select, target = rel_path(target), target.parent
+    return {"root": str(FILE_ROOT), "path": rel_path(target), "select": select,
+            "entries": list_dir(target), "office": bool(SOFFICE)}
+
+
+@app.get("/api/files/search", dependencies=[Depends(auth)])
+def files_search(q: str, path: str = ""):
+    """按文件名搜索，最多 200 条、最多搜 8 秒。"""
+    base, words = resolve_path(path), q.lower().split()
+    if not words:
+        return {"results": [], "partial": False}
+    results, end, partial = [], time.time() + 8, False
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [n for n in dirnames if n.lower() not in HIDDEN_NAMES and not n.startswith(".")]
+        for name in dirnames + filenames:
+            if all(w in name.lower() for w in words):
+                full = Path(dirpath) / name
+                try:
+                    st = full.stat()
+                except OSError:
+                    continue
+                results.append({"name": name, "dir": full.is_dir(), "size": st.st_size, "mtime": st.st_mtime,
+                                "path": rel_path(full)})
+        if len(results) >= 200 or time.time() > end:
+            partial = True
+            break
+    return {"results": results[:200], "partial": partial}
+
+
+@app.get("/api/files/raw", dependencies=[Depends(auth)])
+def files_raw(path: str, download: bool = False):
+    target = resolve_path(path)
+    if not target.is_file():
+        raise HTTPException(400, "这是文件夹")
+    return FileResponse(target, filename=target.name,
+                        content_disposition_type="attachment" if download else "inline")
+
+
+@app.get("/api/files/text", dependencies=[Depends(auth)])
+def files_text(path: str):
+    target = resolve_path(path)
+    data = target.read_bytes()[:TEXT_LIMIT + 1]
+    truncated = len(data) > TEXT_LIMIT
+    data = data[:TEXT_LIMIT]
+    for enc in ("utf-8-sig", "gb18030", "utf-16"):  # 中文 Windows 上的老文件常是 GBK
+        try:
+            text = data.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text, enc = data.decode("utf-8", errors="replace"), "utf-8"
+    return {"text": text, "truncated": truncated, "encoding": enc}
+
+
+@app.get("/api/files/pdf", dependencies=[Depends(auth)])
+async def files_pdf(path: str):
+    """用 LibreOffice 把 Office 文件转成 PDF 预览，按修改时间缓存。"""
+    if not SOFFICE:
+        raise HTTPException(501, "台式机没装 LibreOffice，这种文件不能预览")
+    target = resolve_path(path)
+    st = target.stat()
+    key = uuid.uuid5(uuid.NAMESPACE_URL, f"{target}|{st.st_mtime_ns}|{st.st_size}").hex
+    cache = DATA / "preview"
+    pdf = cache / f"{key}.pdf"
+    if not pdf.exists():
+        async with _soffice_lock:  # soffice 同时只能跑一个
+            if not pdf.exists():
+                work = cache / key
+                work.mkdir(parents=True, exist_ok=True)
+                src = work / ("src" + target.suffix.lower())
+                shutil.copyfile(target, src)  # 复制一份再转，原文件名带特殊字符时 soffice 容易失败
+                cmd = [SOFFICE, "--headless", "--norestore", f"-env:UserInstallation={(cache / 'profile').as_uri()}",
+                       "--convert-to", "pdf", "--outdir", str(work), str(src)]
+                try:
+                    await asyncio.to_thread(subprocess.run, cmd, capture_output=True, timeout=180,
+                                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                except subprocess.TimeoutExpired:
+                    pass
+                out = work / "src.pdf"
+                if out.exists():
+                    out.replace(pdf)
+                shutil.rmtree(work, ignore_errors=True)
+    if not pdf.exists():
+        raise HTTPException(500, "转换失败，可以下载后用本机程序打开")
+    return FileResponse(pdf, media_type="application/pdf", filename=target.stem + ".pdf",
+                        content_disposition_type="inline")
+
+
 # ---------- 给小智 MCP 工具用 ----------
 # 每个新话题开一个语音会话，追问时接着最近的语音会话
 
@@ -668,4 +820,5 @@ async def voice_status():
 if __name__ == "__main__":
     print(f"中心服务启动：http://本机IP:{PORT}   访问密码：{TOKEN}")
     print(f"工作目录 {WORK_DIR}，claude 路径 {CLAUDE_BIN}")
+    print(f"文件预览：{FILE_ROOT}，Office 转换：{SOFFICE or '没装 LibreOffice，Word/Excel 用网页内置预览，PPT 只能下载'}")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")

@@ -98,7 +98,49 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 #login form { background: var(--panel); border: 1px solid var(--border); padding: 24px; border-radius: 12px; width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 10px; }
 #login input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
 
+/* 文件 */
+#filesBox .dialog { max-width: 1280px; height: 90vh; }
+.fhead { flex-wrap: wrap; }
+.crumbs { flex: 1; min-width: 160px; font-size: 14px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.crumbs a { color: var(--accent); text-decoration: none; cursor: pointer; }
+.crumbs a:hover { text-decoration: underline; }
+#fq { width: 200px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 14px; }
+.fbody { flex: 1; display: flex; min-height: 0; }
+#flist { width: 340px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border); padding: 6px; }
+.fi { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.fi:hover { background: var(--chip); }
+.fi.sel { background: var(--user); }
+.fi .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fi .s { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.fi .sub { display: block; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+#fview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.fvhead { padding: 8px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; }
+.fvhead .n { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#fcontent { flex: 1; overflow: auto; position: relative; }
+#fcontent .center { color: var(--muted); text-align: center; margin-top: 20%; padding: 0 20px; }
+#fcontent img { max-width: 100%; display: block; margin: 12px auto; }
+#fcontent iframe { border: 0; width: 100%; height: 100%; display: block; background: #fff; }
+#fcontent video, #fcontent audio { display: block; max-width: 100%; margin: 16px auto; }
+#fcontent pre { margin: 0; padding: 12px 16px; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+#fcontent .mdv { padding: 16px 24px; max-width: 860px; }
+#fcontent .sheet table { border-collapse: collapse; font-size: 13px; margin: 8px; }
+#fcontent .sheet td, #fcontent .sheet th { border: 1px solid var(--border); padding: 2px 6px; white-space: nowrap; }
+.tabs { display: flex; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; position: sticky; top: 0; background: var(--panel); }
+.tabs button { border: 1px solid var(--border); background: var(--bg); border-radius: 6px; padding: 1px 10px; font-size: 13px; }
+.tabs button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+#fcontent .docx-wrapper { background: var(--chip); padding: 16px; }
+a.btn { text-decoration: none; color: inherit; }
+#fcontent .center .btn { margin: 14px 4px 0; }
+a.fpath { color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
+#fback { display: none; }
+
 @media (max-width: 720px) {
+  #flist { width: 100%; border-right: 0; }
+  #fview { display: none; }
+  .fbody.viewing #flist { display: none; }
+  .fbody.viewing #fview { display: flex; }
+  #fback { display: inline-block; }
+  #fq { width: 100%; order: 9; }
   aside { position: fixed; z-index: 5; top: 0; bottom: 0; left: 0; transform: translateX(-100%); transition: transform .2s; }
   aside.open { transform: none; box-shadow: 0 0 30px rgba(0,0,0,.3); }
   #menuBtn { display: inline-block; }
@@ -119,6 +161,7 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
       <label class="toggle" id="bypassWrap" title="打开后本会话的所有操作（包括删除、运行命令）都不再询问">
         <input type="checkbox" id="bypass"> 完全放行
       </label>
+      <button class="btn small" id="filesBtn" title="浏览、预览台式机上的文件">📁 文件</button>
       <button class="btn small" id="stepsBtn">完整过程</button>
       <span id="conn"></span>
     </div>
@@ -136,6 +179,27 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 <div class="overlay" id="stepsBox"><div class="dialog">
   <header><strong>完整过程</strong><span class="meta" id="stepsNote"></span><button class="btn small" id="stepsClose">关闭</button></header>
   <div id="steps"></div>
+</div></div>
+
+<div class="overlay" id="filesBox"><div class="dialog">
+  <header class="fhead">
+    <span class="crumbs" id="crumbs"></span>
+    <input id="fq" placeholder="搜索文件名（当前文件夹及子文件夹）">
+    <button class="btn small" id="filesClose">关闭</button>
+  </header>
+  <div class="fbody" id="fbody">
+    <div id="flist"></div>
+    <div id="fview">
+      <div class="fvhead">
+        <button class="btn small" id="fback">←</button>
+        <span class="n" id="fname"></span>
+        <button class="btn small" id="fask" hidden title="把这个文件的路径填到输入框里">交给 Claude</button>
+        <button class="btn small" id="flocal" hidden title="下载一份副本，用这台电脑上的软件打开">用本机程序打开</button>
+        <a class="btn small" id="fdown" hidden>下载</a>
+      </div>
+      <div id="fcontent"><div class="center">选择左边的文件预览</div></div>
+    </div>
+  </div>
 </div></div>
 
 <div class="overlay" id="login"><form id="loginForm">
@@ -249,6 +313,7 @@ function renderMessages() {
   const box = $("messages");
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   $("list").innerHTML = html;
+  linkifyPaths($("list"));
   if (atBottom || approvals.length) box.scrollTop = box.scrollHeight;
 }
 
@@ -290,7 +355,10 @@ function notify(text) {
 function connect() {
   if (es) es.close();
   es = new EventSource("/api/events?token=" + encodeURIComponent(token));
-  es.onopen = () => { $("conn").textContent = ""; loadSessions(); if (current) openSession(current); };
+  es.onopen = () => {
+    $("conn").textContent = ""; loadSessions(); if (current) openSession(current);
+    if (!F.root) api("/api/files").then(d => { Object.assign(F, { root: d.root, office: d.office, path: d.path, entries: d.entries }); renderMessages(); }).catch(() => {});
+  };
   es.onerror = () => { $("conn").textContent = "连接中断，正在重连…"; };
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
@@ -403,6 +471,221 @@ $("title").ondblclick = async () => {
   const t = prompt("会话名称", $("title").textContent);
   if (t) api("/api/sessions/" + current, { method: "PATCH", body: JSON.stringify({ title: t }) });
 };
+
+
+// ---------- 文件浏览和预览 ----------
+const F = { root: "", office: false, path: "", entries: [], sel: null, searching: false };
+const EXT = {
+  image: "png jpg jpeg gif webp bmp svg ico avif tif tiff heic",
+  pdf: "pdf",
+  video: "mp4 webm mov m4v ogv",
+  audio: "mp3 wav ogg m4a flac aac opus",
+  md: "md markdown",
+  text: "txt log json xml yaml yml ini cfg conf toml py js ts jsx tsx css html htm vue bat cmd ps1 sh c cpp h hpp cs java kt go rs rb php sql lua r m srt properties env gitignore",
+  docx: "docx",
+  sheet: "xlsx xlsm xls csv ods",
+  office: "doc ppt pptx rtf odt odp wps et dps pps ppsx",
+};
+const kindOf = name => {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  for (const k in EXT) if (EXT[k].split(" ").includes(ext)) return k;
+  return "other";
+};
+const ICON = { dir: "📁", image: "🖼", pdf: "📕", video: "🎬", audio: "🎵", md: "📝", text: "📄", docx: "📘", sheet: "📊", office: "📙", other: "📦" };
+const IS_DESKTOP = !!(window.__TAURI__ && window.__TAURI__.core);
+const fileUrl = (p, extra = "") => `/api/files/${extra || "raw"}?path=${encodeURIComponent(p)}&token=${encodeURIComponent(token)}`;
+const winPath = p => F.root.replace(/[\\/]$/, "") + (F.root.includes("\\") ? "\\" + p.replaceAll("/", "\\") : "/" + p);
+function fsize(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(1) + " GB";
+}
+const fdate = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+
+const libs = {};
+function loadScript(src) {
+  return libs[src] || (libs[src] = new Promise((ok, fail) => {
+    const s = document.createElement("script"); s.src = src; s.onload = ok;
+    s.onerror = () => { delete libs[src]; fail(new Error("预览组件加载失败，检查这台电脑能不能上网")); };
+    document.head.appendChild(s);
+  }));
+}
+
+function renderCrumbs() {
+  const parts = F.path ? F.path.split("/") : [];
+  let html = `<a data-go="">${esc(F.root)}</a>`;
+  parts.forEach((p, i) => { html += ` › <a data-go="${esc(parts.slice(0, i + 1).join("/"))}">${esc(p)}</a>`; });
+  if (F.searching) html += " › 搜索结果";
+  $("crumbs").innerHTML = html;
+}
+
+function renderList() {
+  const list = F.entries;
+  $("flist").innerHTML = list.length ? list.map((e, i) => `
+    <div class="fi ${e.path === F.sel ? "sel" : ""}" data-i="${i}" title="${esc(e.name)}">
+      <span>${e.dir ? ICON.dir : ICON[kindOf(e.name)]}</span>
+      <span class="n">${esc(e.name)}${F.searching ? `<span class="sub">${esc(e.path)}</span>` : ""}</span>
+      <span class="s">${e.dir ? "" : fsize(e.size) + " · "}${fdate(e.mtime)}</span>
+    </div>`).join("") : '<div class="meta" style="padding:12px">这里是空的</div>';
+  const sel = $("flist").querySelector(".sel");
+  if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+
+async function openDir(path) {
+  $("fq").value = ""; F.searching = false;
+  $("flist").innerHTML = '<div class="meta" style="padding:12px">读取中…</div>';
+  try {
+    const d = await api("/api/files?path=" + encodeURIComponent(path));
+    Object.assign(F, { root: d.root, office: d.office, path: d.path, entries: d.entries });
+    renderCrumbs();
+    if (d.select) { const e = d.entries.find(x => x.path === d.select); if (e) return preview(e); }
+    renderList();
+  } catch (e) { $("flist").innerHTML = `<div class="meta" style="padding:12px">${esc(e.message)}</div>`; }
+}
+
+let searchTimer;
+$("fq").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const q = $("fq").value.trim();
+  if (!q) return openDir(F.path);
+  searchTimer = setTimeout(async () => {
+    $("flist").innerHTML = '<div class="meta" style="padding:12px">搜索中…</div>';
+    try {
+      const d = await api(`/api/files/search?path=${encodeURIComponent(F.path)}&q=${encodeURIComponent(q)}`);
+      if ($("fq").value.trim() !== q) return;
+      F.searching = true; F.entries = d.results; renderCrumbs(); renderList();
+      if (d.partial) $("flist").insertAdjacentHTML("beforeend", '<div class="meta" style="padding:8px">结果太多，只显示一部分，换个更具体的词试试</div>');
+    } catch (e) { $("flist").innerHTML = `<div class="meta" style="padding:12px">${esc(e.message)}</div>`; }
+  }, 400);
+});
+
+async function preview(e) {
+  if (e.dir) return openDir(e.path);
+  F.sel = e.path; renderList();
+  $("fbody").classList.add("viewing");
+  $("fname").textContent = e.name; $("fname").title = winPath(e.path);
+  $("fdown").hidden = false; $("fdown").href = fileUrl(e.path) + "&download=1"; $("fdown").setAttribute("download", e.name);
+  $("fask").hidden = false;
+  $("flocal").hidden = !IS_DESKTOP;
+  const box = $("fcontent");
+  const kind = kindOf(e.name);
+  const url = fileUrl(e.path);
+  const msg = t => box.innerHTML = `<div class="center">${t}</div>`;
+  // 预览不了时的提示：桌面软件里给“用本机程序打开”，浏览器里给“下载”
+  const cannot = why => msg(`${esc(e.name)}<br>${fsize(e.size)} · ${fdate(e.mtime)}<br><br>${why}<br>`
+    + (IS_DESKTOP ? `可以用这台电脑上的软件打开。<br><button class="btn primary" data-local>用本机程序打开</button>`
+                  : `可以下载后用本机软件打开。<br><a class="btn primary" href="${url}&download=1" download="${esc(e.name)}">下载</a>`));
+  msg("加载中…");
+  try {
+    if (kind === "image") box.innerHTML = `<img src="${url}" alt="">`;
+    else if (kind === "pdf") box.innerHTML = `<iframe src="${url}"></iframe>`;
+    else if (kind === "video") box.innerHTML = `<video src="${url}" controls></video>`;
+    else if (kind === "audio") box.innerHTML = `<audio src="${url}" controls></audio>`;
+    else if (kind === "md" || kind === "text") {
+      const d = await api("/api/files/text?path=" + encodeURIComponent(e.path));
+      if (F.sel !== e.path) return;
+      const note = d.truncated ? '<div class="meta" style="padding:8px 16px">文件太大，只显示前 1 MB</div>' : "";
+      box.innerHTML = note + (kind === "md" ? `<div class="mdv msg">${md(d.text)}</div>` : `<pre>${esc(d.text)}</pre>`);
+    } else if (kind === "docx") {
+      if (e.size > 50 * 1048576) return cannot("文件太大，不适合在这里预览。");
+      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
+      await loadScript("https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js");
+      const blob = await fetch(url).then(r => r.ok ? r.blob() : Promise.reject(new Error("读取失败")));
+      if (F.sel !== e.path) return;
+      box.innerHTML = "";
+      await docx.renderAsync(blob, box, null, { inWrapper: true, ignoreLastRenderedPageBreak: true });
+    } else if (kind === "sheet") {
+      if (e.size > 30 * 1048576) return cannot("表格太大，不适合在这里预览。");
+      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
+      const buf = await fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error("读取失败")));
+      if (F.sel !== e.path) return;
+      const wb = XLSX.read(buf, { type: "array", codepage: 936 });
+      const show = name => {
+        const ws = wb.Sheets[name];
+        const html = XLSX.utils.sheet_to_html(ws, { header: "", footer: "" });
+        box.innerHTML = `<div class="tabs">${wb.SheetNames.map(n => `<button class="${n === name ? "on" : ""}" data-sheet="${esc(n)}">${esc(n)}</button>`).join("")}</div>`
+          + `<div class="sheet">${window.DOMPurify ? DOMPurify.sanitize(html) : html}</div>`;
+        box.querySelectorAll("[data-sheet]").forEach(b => b.onclick = () => show(b.dataset.sheet));
+      };
+      show(wb.SheetNames[0]);
+    } else if (kind === "office") {
+      if (!F.office) return cannot("这种格式需要台式机装了 LibreOffice 才能预览。");
+      msg("正在转换成 PDF 预览，大文件第一次要等一会儿…");
+      box.innerHTML = `<iframe src="${fileUrl(e.path, "pdf")}"></iframe>`;
+    } else {
+      cannot("这种格式不能在这里预览。");
+    }
+  } catch (err) { if (F.sel === e.path) cannot("预览失败：" + esc(err.message)); }
+  // 图片、视频、音频格式浏览器不支持时（比如 HEIC、TIFF、部分视频编码）
+  const media = box.querySelector("img, video, audio");
+  if (media) media.onerror = () => { if (F.sel === e.path) cannot("这个文件的格式或编码这里放不了。"); };
+}
+
+function showFiles(path = null) {
+  $("filesBox").classList.add("show");
+  $("side").classList.remove("open");
+  if (path !== null) openDir(path);
+  else if (!F.opened) openDir(F.path);
+  F.opened = true;
+}
+
+// 把回复里提到的工作目录下的路径变成可点的链接
+function linkifyPaths(container) {
+  if (!F.root) return;
+  const sep = F.root.includes("\\") ? "\\\\" : "/";
+  const root = F.root.replace(/[\\/]$/, "");
+  const re = new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + sep + `[^\\s<>"'\`|*?，。；：、！？（）()【】「」]*[^\\s<>"'\`|*?，。；：、！？（）()【】「」.,:;]`, "gi");
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => n.parentElement.closest("a, textarea, .approval") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  });
+  const nodes = [];
+  while (walker.nextNode()) if (walker.currentNode.nodeValue.match(re)) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    node.nodeValue.replace(re, (m, idx) => {
+      frag.append(node.nodeValue.slice(last, idx));
+      const a = document.createElement("a");
+      a.className = "fpath"; a.textContent = m; a.dataset.fpath = m; a.title = "点击预览";
+      frag.append(a); last = idx + m.length;
+    });
+    frag.append(node.nodeValue.slice(last));
+    node.replaceWith(frag);
+  }
+}
+
+$("filesBtn").onclick = () => showFiles();
+$("filesClose").onclick = () => $("filesBox").classList.remove("show");
+$("fback").onclick = () => $("fbody").classList.remove("viewing");
+$("crumbs").onclick = e => { if (e.target.dataset.go !== undefined) openDir(e.target.dataset.go); };
+$("flist").onclick = e => { const row = e.target.closest(".fi"); if (row) preview(F.entries[+row.dataset.i]); };
+async function openLocal() {
+  const btns = document.querySelectorAll("#flocal, [data-local]");
+  btns.forEach(b => { b.disabled = true; b.dataset.label = b.textContent; b.textContent = "正在下载…"; });
+  try {
+    await window.__TAURI__.core.invoke("open_remote_file", { path: F.sel, token });
+    flash("已用本机程序打开。这是一份副本，修改后不会保存回台式机。");
+  } catch (err) { alert(String(err)); }
+  finally { btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.label; }); }
+}
+function flash(text) {
+  const d = document.createElement("div");
+  d.textContent = text;
+  d.style.cssText = "position:fixed;left:50%;bottom:32px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:8px 16px;border-radius:8px;font-size:14px;z-index:20;max-width:90vw";
+  document.body.appendChild(d); setTimeout(() => d.remove(), 4000);
+}
+$("flocal").onclick = openLocal;
+$("fcontent").addEventListener("click", e => { if (e.target.closest("[data-local]")) openLocal(); });
+$("fask").onclick = () => {
+  const t = $("input");
+  t.value = (t.value ? t.value.trimEnd() + " " : "") + winPath(F.sel) + " ";
+  $("filesBox").classList.remove("show"); autosize(); t.focus();
+};
+$("messages").addEventListener("click", e => { const a = e.target.closest("a.fpath"); if (a) showFiles(a.dataset.fpath); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { $("filesBox").classList.remove("show"); $("stepsBox").classList.remove("show"); }
+});
 
 $("me").textContent = me;
 if (token && me) api("/api/sessions").then(() => connect()).catch(() => {});

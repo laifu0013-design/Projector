@@ -320,7 +320,7 @@ fn supervise(app: AppHandle) {
 
 // ---------- 窗口 ----------
 
-/// 允许服务器网页调用通知插件（网页的地址是用户填的，只能在运行时加）
+/// 允许服务器网页调用通知插件和本软件的命令（网页的地址是用户填的，只能在运行时加）
 fn allow_remote(app: &AppHandle, url: &Url) {
     let state = app.state::<AppState>();
     let n = state.cap_seq.fetch_add(1, Ordering::SeqCst);
@@ -328,7 +328,8 @@ fn allow_remote(app: &AppHandle, url: &Url) {
     let cap = CapabilityBuilder::new(format!("server-page-{n}"))
         .remote(pattern)
         .window("main")
-        .permission("notification:default");
+        .permission("notification:default")
+        .permission("allow-open-remote-file");
     if let Err(e) = app.add_capability(cap) {
         eprintln!("添加网页权限失败：{e}");
     }
@@ -400,6 +401,62 @@ fn apply_server_mode(app: &AppHandle, on: bool) {
     if let Some(tray) = app.state::<AppState>().tray.lock().unwrap().as_ref() {
         let _ = tray.mode.set_checked(on);
     }
+}
+
+
+// ---------- 网页调用：用本机程序打开台式机上的文件 ----------
+
+/// 直接打开会运行程序的类型，不帮着打开
+const RISKY_EXT: &[&str] = &[
+    "exe", "msi", "bat", "cmd", "com", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "scr", "pif",
+    "lnk", "reg", "cpl", "jar", "msc", "appx", "msix", "url",
+];
+
+fn safe_file_name(name: &str) -> String {
+    let cleaned: String = name.chars().map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c }).collect();
+    let cleaned = cleaned.trim().trim_end_matches('.').to_string();
+    if cleaned.is_empty() { "file".into() } else { cleaned }
+}
+
+/// 从中心服务下载一份副本到临时文件夹，再用系统默认程序打开。返回副本路径。
+#[tauri::command]
+async fn open_remote_file(app: AppHandle, path: String, token: String) -> Result<String, String> {
+    let server = app.state::<AppState>().cfg.lock().unwrap().server_url.clone();
+    if server.is_empty() {
+        return Err("还没设置服务器地址".into());
+    }
+    let name = safe_file_name(path.rsplit(['/', '\\']).next().unwrap_or("file"));
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    if RISKY_EXT.contains(&ext.as_str()) {
+        return Err(format!(".{ext} 文件打开后会直接运行程序，为了安全不在这里打开。需要的话请到台式机上运行。"));
+    }
+    let url = format!(
+        "{}/api/files/raw?path={}&download=1",
+        server.trim_end_matches('/'),
+        urlencoding::encode(&path)
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        // 每次放进单独的子文件夹：同名文件可能还开着（Word 会锁住文件）
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let dir = std::env::temp_dir().join("Projector").join(stamp.to_string());
+        fs::create_dir_all(&dir).map_err(|e| format!("建临时文件夹失败：{e}"))?;
+        let dest = dir.join(&name);
+        let resp = ureq::get(&url)
+            .set("Authorization", &format!("Bearer {token}"))
+            .call()
+            .map_err(|e| match e {
+                ureq::Error::Status(401, _) => "访问密码不对".to_string(),
+                ureq::Error::Status(code, _) => format!("服务器返回错误 {code}"),
+                other => format!("连不上服务器：{other}"),
+            })?;
+        let mut file = File::create(&dest).map_err(|e| format!("保存失败：{e}"))?;
+        std::io::copy(&mut resp.into_reader(), &mut file).map_err(|e| format!("下载中断：{e}"))?;
+        drop(file);
+        open::that_detached(&dest).map_err(|e| format!("没有能打开 .{ext} 文件的程序：{e}"))?;
+        Ok(dest.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---------- 设置页调用的命令 ----------
@@ -514,7 +571,7 @@ pub fn run() {
             quitting: AtomicBool::new(false),
             cap_seq: AtomicU32::new(0),
         })
-        .invoke_handler(tauri::generate_handler![get_config, save_config])
+        .invoke_handler(tauri::generate_handler![get_config, save_config, open_remote_file])
         .setup(|app| {
             let handle = app.handle().clone();
             let cfg = load_config(&handle);
