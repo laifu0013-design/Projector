@@ -16,7 +16,7 @@ from fastapi import Depends, HTTPException, Request
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-for _d in ("mcp", "workspaces", "skills/library", "skills/submissions", "plugins", "preview"):
+for _d in ("mcp", "workspaces", "skills/library", "skills/submissions", "skills/versions", "plugins", "preview"):
     (DATA / _d).mkdir(parents=True, exist_ok=True)
 
 WORK_DIR = os.environ.get("CLAUDE_WORK_DIR", "D:\\")
@@ -24,6 +24,7 @@ FILE_ROOT = Path(os.environ.get("FILES_ROOT") or WORK_DIR).resolve()
 WS_ROOT = (DATA / "workspaces").resolve()
 LIBRARY = (DATA / "skills" / "library").resolve()
 SUBMISSIONS = (DATA / "skills" / "submissions").resolve()
+VERSIONS = (DATA / "skills" / "versions").resolve()
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 PORT = int(os.environ.get("CENTER_PORT", "8080"))
 DISCOVERY_PORT = int(os.environ.get("DISCOVERY_PORT", "8090"))
@@ -106,10 +107,15 @@ _db.executescript(
     CREATE TABLE IF NOT EXISTS submissions (
         id TEXT PRIMARY KEY, name TEXT, description TEXT, status TEXT, submitted_by INTEGER,
         created REAL, reviewed_by INTEGER, reviewed_at REAL, note TEXT);
+    CREATE TABLE IF NOT EXISTS skill_versions (
+        name TEXT, version INTEGER, submission_id TEXT, submitted_by INTEGER, approved_by INTEGER,
+        changelog TEXT, created REAL, PRIMARY KEY (name, version));
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
     """
 )
 for _table, _col in (("sessions", "bypass INTEGER DEFAULT 0"), ("sessions", "created_by TEXT DEFAULT ''"),
-                     ("sessions", "user_id INTEGER"), ("sessions", "work_dir TEXT"), ("users", "avatar TEXT")):
+                     ("sessions", "user_id INTEGER"), ("sessions", "work_dir TEXT"), ("users", "avatar TEXT"),
+                     ("library", "version INTEGER DEFAULT 1"), ("submissions", "changelog TEXT")):
     try:
         _db.execute(f"ALTER TABLE {_table} ADD COLUMN {_col}")
     except sqlite3.OperationalError:
@@ -122,6 +128,15 @@ def db(sql: str, args=(), one=False):
         _db.commit()
         rows = [dict(r) for r in cur.fetchall()]
     return (rows[0] if rows else None) if one else rows
+
+
+def get_setting(key: str, default=None):
+    row = db("SELECT value FROM settings WHERE key=?", (key,), one=True)
+    return json.loads(row["value"]) if row else default
+
+
+def set_setting(key: str, value) -> None:
+    db("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, json.dumps(value, ensure_ascii=False)))
 
 
 # ---------- 账号 ----------

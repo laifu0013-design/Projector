@@ -203,6 +203,7 @@ function renderUserMenu() {
   $("userMenu").innerHTML = `
     <button data-act="avatar">${icon("user", 16)}更换头像</button>
     <button data-act="skills">${icon("puzzle", 16)}我的技能</button>
+    <button data-act="mobile">${icon("phone", 16)}在手机上打开</button>
     ${me.role === "admin" ? `<button data-act="admin">${icon("shield", 16)}管理后台</button>` : ""}
     <hr>
     <button data-act="theme">${icon(th[1], 16)}主题：${th[0]}</button>
@@ -218,6 +219,7 @@ $("userCard").onclick = e => {
   $("userMenu").hidden = true;
   if (act === "avatar") pickAvatar();
   if (act === "skills") loadSkills().then(openMySkills);
+  if (act === "mobile") showMobile();
   if (act === "admin") window.openAdmin && window.openAdmin();
   if (act === "theme") {
     const order = ["auto", "light", "dark"], cur = store.get("theme") || "auto";
@@ -631,7 +633,7 @@ async function loadSkills() {
 
 function openSkillPop() {
   const pop = $("skillPop");
-  pop.innerHTML = (mySkills.length ? mySkills.map(s => `<div class="it" data-skill="${esc(s.name)}"><span class="ii">${icon("puzzle", 15)}</span><div><b>${esc(s.name)}</b><small>${esc(s.description)}</small></div></div>`).join("")
+  pop.innerHTML = (mySkills.length ? mySkills.map(s => `<div class="it" data-skill="${esc(s.name)}"><span class="ii">${icon("puzzle", 15)}</span><div style="flex:1;min-width:0"><b>${esc(s.name)} <span class="vtag" style="font-size:10px">v${s.version || 1}</span></b><small>${esc(s.description)}</small></div><button class="iconbtn" data-detail="${esc(s.name)}" title="详情和版本记录">${icon("history", 15)}</button></div>`).join("")
     : '<div class="empty-note" style="padding:10px 12px">管理员还没给你分配技能。</div>')
     + `<div class="sep"></div><div class="it" data-skills-mgr><span class="ii">${icon("upload", 15)}</span><div><b>提交新技能</b><small>查看我的提交和审核状态</small></div></div>`;
   pop.hidden = false;
@@ -641,6 +643,8 @@ $("skillPop").onclick = e => {
   const it = e.target.closest(".it");
   if (!it) return;
   $("skillPop").hidden = true;
+  const det = e.target.closest("[data-detail]");
+  if (det) return openSkillDetail(det.dataset.detail);
   if (it.dataset.skillsMgr !== undefined) return openMySkills();
   composer.skill = it.dataset.skill; renderComposerChips(); $("input").focus();
 };
@@ -1015,52 +1019,175 @@ $("messages").addEventListener("click", e => {
   if (a) showFiles(a.dataset.fpath);
 });
 
-// ---------- 我的技能：提交和查看 ----------
+// ---------- 技能：我的技能、技能详情和版本记录、提交新版本 ----------
 
-async function openMySkills() {
-  const subs = await api("/api/skills/submissions").catch(() => []);
-  const st = { pending: "待审核", approved: "已入库", rejected: "未通过" };
-  const mine = subs.filter(s => s.submitted_by === me.id);
-  const body = dialog("技能", `
-    <div style="font-weight:600;margin-bottom:8px">我能用的技能</div>
-    ${mySkills.length ? mySkills.map(s => `<div class="card" style="padding:10px 14px"><h4>${icon("puzzle", 15)}${esc(s.name)}</h4><div class="muted" style="font-size:13px">${esc(s.description)}</div></div>`).join("") : '<p class="empty-note">还没有，管理员分配后会出现在这里。</p>'}
-    <div style="font-weight:600;margin:18px 0 6px">提交新技能</div>
-    <p class="muted" style="margin:0 0 10px;font-size:13px">技能是一个文件夹，里面必须有 SKILL.md（开头写 name 和 description）。提交后由管理员审核，通过后入库。</p>
+// 通用文件查看器（技能审核、版本文件都用）：左边文件列表，右边内容；changes 用来标出新增、修改、删除
+function fileViewer(title, files, buttons = [], extraHtml = "", changes = null) {
+  const badge = p => !changes ? "" : changes.added.includes(p) ? '<span class="cbadge add">新增</span>' : changes.modified.includes(p) ? '<span class="cbadge mod">修改</span>' : "";
+  const removed = changes && changes.removed.length ? `<div class="muted" style="font-size:12.5px;margin:-4px 0 10px">删除了：${changes.removed.map(esc).join("、")}</div>` : "";
+  const body = dialog(title, `${extraHtml}${removed}<div class="filev"><div class="list">${files.map((f, i) =>
+    `<div data-i="${i}">${badge(f.path)}${/\.(py|sh|bat|cmd|ps1|js|ts|exe|dll)$/i.test(f.path) ? '<span class="status pending">脚本</span> ' : ""}${esc(f.path)} <span class="muted" style="font-size:11.5px">${fsize(f.size)}</span></div>`).join("")}</div>
+    <pre id="fvPre">选左边的文件查看内容</pre></div>`, buttons, true);
+  const pick = i => {
+    const f = files[i];
+    body.querySelectorAll(".filev .list div").forEach(d => d.classList.toggle("on", +d.dataset.i === i));
+    body.querySelector("#fvPre").textContent = f.text == null ? `（二进制文件，${fsize(f.size)}，不能显示）` : f.text + (f.truncated ? "\n……（太长，已截断）" : "");
+  };
+  body.querySelector(".filev .list").onclick = e => { const d = e.target.closest("[data-i]"); if (d) pick(+d.dataset.i); };
+  const changed = changes ? files.findIndex(f => changes.modified.includes(f.path) || changes.added.includes(f.path)) : -1;
+  const first = changed >= 0 ? changed : files.findIndex(f => f.path === "SKILL.md");
+  if (files.length) pick(first >= 0 ? first : 0);
+  return body;
+}
+
+// 上传技能文件（zip 或文件夹）并提交审核；changelog 是更新说明
+async function submitSkill(upload, changelog) {
+  const sub = await post("/api/skills/submissions");
+  await upload(sub.id);
+  return post(`/api/skills/submissions/${sub.id}/submit`, { changelog });
+}
+
+function skillUploadHtml(prefix, withLog = true) {
+  return `${withLog ? `<input class="field" id="${prefix}Log" placeholder="更新说明：这次改了什么（更新已有技能时必填）" style="margin-bottom:8px">` : ""}
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn small" id="skZip">${icon("upload", 14)}上传 zip 压缩包</button>
-      <button class="btn small" id="skDir">${icon("folder", 14)}选择技能文件夹</button>
+      <button class="btn small" id="${prefix}Zip">${icon("upload", 14)}上传 zip 压缩包</button>
+      <button class="btn small" id="${prefix}Dir">${icon("folder", 14)}选择技能文件夹</button>
     </div>
-    <input type="file" id="skZipIn" accept=".zip" hidden><input type="file" id="skDirIn" webkitdirectory hidden>
-    <div class="err" id="skErr" style="margin-top:6px"></div>
-    <div style="font-weight:600;margin:12px 0 6px">我的提交</div>
-    ${mine.map(s => `<div class="card" style="padding:10px 14px"><h4>${esc(s.name)} <span class="status ${s.status}">${st[s.status] || s.status}</span></h4>
-      <div class="muted" style="font-size:12.5px">${ftime(s.created)}${s.note ? " · 管理员备注：" + esc(s.note) : ""}</div></div>`).join("") || '<p class="empty-note">还没有提交过。</p>'}
-  `, [], true);
-  body.querySelector("#skZip").onclick = () => body.querySelector("#skZipIn").click();
-  body.querySelector("#skDir").onclick = () => body.querySelector("#skDirIn").click();
-  const submit = async upload => {
-    body.querySelector("#skErr").textContent = "正在提交…";
-    try {
-      const sub = await post("/api/skills/submissions");
-      await upload(sub.id);
-      const r = await post(`/api/skills/submissions/${sub.id}/submit`);
-      toast(`已提交技能 ${r.name}，等管理员审核`, "ok");
-      openMySkills();
-    } catch (e) { body.querySelector("#skErr").textContent = e.message; }
+    <input type="file" id="${prefix}ZipIn" accept=".zip" hidden><input type="file" id="${prefix}DirIn" webkitdirectory hidden>
+    <div class="err" id="${prefix}Err" style="margin-top:6px"></div>`;
+}
+
+function bindSkillUpload(body, prefix, done, needLog = false) {
+  const err = body.querySelector(`#${prefix}Err`);
+  const go = async upload => {
+    const log = (body.querySelector(`#${prefix}Log`)?.value || "").trim();
+    if (needLog && !log) { err.textContent = "请先写更新说明"; body.querySelector(`#${prefix}Log`).focus(); return; }
+    err.textContent = "正在提交…";
+    try { const r = await submitSkill(upload, log); done(r); } catch (e) { err.textContent = e.message; }
   };
-  body.querySelector("#skZipIn").onchange = e => {
-    const f = e.target.files[0]; if (!f) return;
-    submit(id => api(`/api/skills/submissions/${id}/zip`, { method: "PUT", body: f, raw: true }));
+  body.querySelector(`#${prefix}Zip`).onclick = () => body.querySelector(`#${prefix}ZipIn`).click();
+  body.querySelector(`#${prefix}Dir`).onclick = () => body.querySelector(`#${prefix}DirIn`).click();
+  body.querySelector(`#${prefix}ZipIn`).onchange = e => {
+    const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+    go(id => api(`/api/skills/submissions/${id}/zip`, { method: "PUT", body: f, raw: true }));
   };
-  body.querySelector("#skDirIn").onchange = e => {
-    const files = [...e.target.files]; if (!files.length) return;
-    submit(async id => {
+  body.querySelector(`#${prefix}DirIn`).onchange = e => {
+    const files = [...e.target.files]; e.target.value = ""; if (!files.length) return;
+    go(async id => {
       for (const f of files) {
         const rel = f.webkitRelativePath.split("/").slice(1).join("/") || f.name;
         await api(`/api/skills/submissions/${id}/file?path=${encodeURIComponent(rel)}`, { method: "PUT", body: f, raw: true });
       }
     });
   };
+}
+
+async function openMySkills() {
+  const subs = await api("/api/skills/submissions").catch(() => []);
+  const st = { pending: "待审核", approved: "已入库", rejected: "未通过" };
+  const mine = subs.filter(s => s.submitted_by === me.id);
+  const body = dialog("技能", `
+    <div style="font-weight:600;margin-bottom:8px">我能用的技能 <span class="muted" style="font-weight:400;font-size:12.5px">点开看版本记录、修改</span></div>
+    ${mySkills.length ? mySkills.map((s, i) => `<div class="card" data-skill="${esc(s.name)}" style="padding:10px 14px;cursor:pointer;animation-delay:${i * 30}ms"><h4>${icon("puzzle", 15)}${esc(s.name)} <span class="vtag">v${s.version || 1}</span></h4><div class="muted" style="font-size:13px">${esc(s.description)}</div></div>`).join("") : '<p class="empty-note">还没有，管理员分配后会出现在这里。</p>'}
+    <div style="font-weight:600;margin:18px 0 6px">提交新技能</div>
+    <p class="muted" style="margin:0 0 10px;font-size:13px">技能是一个文件夹，里面必须有 SKILL.md（开头写 name 和 description）。也可以直接在对话里说“帮我做一个××技能”，让 Claude 写好提交。提交后由管理员审核。</p>
+    ${skillUploadHtml("sk")}
+    <div style="font-weight:600;margin:12px 0 6px">我的提交</div>
+    ${mine.map(s => `<div class="card" style="padding:10px 14px"><h4>${esc(s.name)} <span class="status ${s.status}">${st[s.status] || s.status}</span></h4>
+      ${s.changelog ? `<div style="font-size:13px">${esc(s.changelog)}</div>` : ""}
+      <div class="muted" style="font-size:12.5px">${ftime(s.created)}${s.note ? " · 管理员备注：" + esc(s.note) : ""}</div></div>`).join("") || '<p class="empty-note">还没有提交过。</p>'}
+  `, [], true);
+  body.querySelectorAll(".card[data-skill]").forEach(c => c.onclick = () => openSkillDetail(c.dataset.skill));
+  bindSkillUpload(body, "sk", r => { toast(`已提交技能 ${r.name}，等管理员审核`, "ok"); openMySkills(); });
+}
+
+// 技能详情：说明、版本记录（谁改的、改了什么）、在对话里修改、上传新版本；管理员还能回滚
+async function openSkillDetail(name) {
+  let d;
+  try { d = await api("/api/skills/" + encodeURIComponent(name)); } catch (e) { return toast(e.message, "err"); }
+  const sk = d.skill, isAdmin = me.role === "admin";
+  const body = dialog("技能详情", `
+    <div class="sk-head"><span class="big">${icon("puzzle", 26)}</span><div><h3>${esc(sk.name)} <span class="vtag">v${sk.version}</span></h3><p>${esc(sk.description)}</p></div></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <button class="btn small primary" id="sdChat">${icon("chat", 14)}在对话里修改</button>
+      <button class="btn small" id="sdUse">${icon("sparkle", 14)}用它开始一个任务</button>
+      <button class="btn small" id="sdUp">${icon("upload", 14)}上传新版本</button>
+    </div>
+    <div id="sdUpBox" hidden class="card" style="margin-bottom:14px">${skillUploadHtml("sdu")}<div class="muted" style="font-size:12.5px">SKILL.md 里的 name 要保持 <code>${esc(sk.name)}</code>，否则会变成一个新技能。</div></div>
+    ${d.pending.length ? `<div class="card warnc" style="padding:10px 14px">${icon("clock", 14)} 有 ${d.pending.length} 个新版本在等管理员审核：${d.pending.map(p => esc(p.submitter) + "「" + esc(p.changelog || "没写说明") + "」").join("；")}</div>` : ""}
+    <div style="font-weight:600;margin-top:6px">${icon("history", 15)} 版本记录</div>
+    <ol class="vtl">${d.versions.map((v, i) => `<li class="${v.version === sk.version ? "cur" : ""}" style="animation-delay:${i * 40}ms">
+      <span class="vn">v${v.version}</span>
+      <div class="vb">
+        <div class="vm">${avatarEl(v.submitter_avatar, 18)}${esc(v.submitter || "—")} · ${ftime(v.created)}${v.approver ? ` · ${esc(v.approver)} 审核` : ""}${v.version === sk.version ? ' · <span class="tag admin">当前</span>' : ""}</div>
+        <div class="vc">${esc(v.changelog || "没写更新说明")}</div>
+        <div class="va"><button class="btn small ghost" data-vfiles="${v.version}">${icon("eye", 13)}查看文件</button>
+          ${isAdmin && v.version !== sk.version ? `<button class="btn small ghost" data-rollback="${v.version}">${icon("history", 13)}回滚到这个版本</button>` : ""}</div>
+      </div></li>`).join("")}</ol>
+  `, [], true);
+  body.querySelector("#sdChat").onclick = () => {
+    closeDialog(); $("dlgBox").classList.remove("show");
+    resetComposer(); openSession(null);
+    $("input").value = `我想修改技能「${sk.name}」：`; autosize();
+    setTimeout(() => { const t = $("input"); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }, 50);
+    toast("说清楚要改什么，Claude 会取出技能、改好后提交新版本给管理员审核", "info", 5000);
+  };
+  body.querySelector("#sdUse").onclick = () => { closeDialog(); composer.skill = sk.name; renderComposerChips(); $("input").focus(); };
+  body.querySelector("#sdUp").onclick = () => { body.querySelector("#sdUpBox").hidden = !body.querySelector("#sdUpBox").hidden; };
+  bindSkillUpload(body, "sdu", r => { toast(`已提交 ${r.name} 的新版本，等管理员审核`, "ok"); openSkillDetail(name); }, true);
+  body.querySelectorAll("[data-vfiles]").forEach(b => b.onclick = async () => {
+    const v = +b.dataset.vfiles;
+    const f = await api(`/api/skills/${encodeURIComponent(name)}/versions/${v}/files`);
+    fileViewer(`${name} v${v} 的文件`, f.files, [{ label: "返回", onClick: () => { setTimeout(() => openSkillDetail(name), 0); } }],
+      f.changes ? '<div class="muted" style="font-size:12.5px;margin-bottom:8px">标出了相对上一个版本的改动</div>' : "", f.changes);
+  });
+  body.querySelectorAll("[data-rollback]").forEach(b => b.onclick = async () => {
+    const v = +b.dataset.rollback;
+    if (!confirm(`回滚到 v${v}？会生成一个内容和 v${v} 一样的新版本，所有能用这个技能的人马上生效。`)) return;
+    try { const r = await post(`/api/admin/library/${encodeURIComponent(name)}/rollback`, { version: v }); toast(`已回滚，现在是 v${r.version}`, "ok"); openSkillDetail(name); loadSkills(); }
+    catch (e) { toast(e.message, "err"); }
+  });
+}
+
+// ---------- 在手机上打开：二维码 ----------
+
+async function showMobile() {
+  let lan;
+  try { lan = await api("/api/lan"); } catch (e) { return toast(e.message, "err"); }
+  const urls = lan.urls.length ? lan.urls : [location.origin];
+  try { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"); }
+  catch (e) { return toast(e.message, "err"); }
+  const qrSvg = url => {
+    const qr = qrcode(0, "H"); qr.addData(url); qr.make();
+    const n = qr.getModuleCount(), c = Math.floor(n / 2), hole = Math.ceil(n * 0.13);
+    let rects = "";
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      if (!qr.isDark(y, x) || (Math.abs(x - c) <= hole && Math.abs(y - c) <= hole)) continue;  // 中间留给橙光球
+      const finder = (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7);
+      rects += `<rect x="${x + .06}" y="${y + .06}" width=".88" height=".88" rx="${finder ? .2 : .42}" fill="${finder ? "#c24f1c" : "#201b15"}"/>`;
+    }
+    return `<svg viewBox="0 0 ${n} ${n}" shape-rendering="geometricPrecision">${rects}</svg>`;
+  };
+  const render = url => {
+    $("dlgBody").querySelector(".qrcard").innerHTML = qrSvg(url) + orb(46);
+    $("dlgBody").querySelector("#qrUrl").textContent = url;
+  };
+  const body = dialog("在手机上打开", `<div class="qrwrap">
+    <div class="qrcard"></div>
+    <div class="qrurl"><span id="qrUrl"></span><button class="iconbtn" id="qrCopy" data-tip="复制">${icon("copy", 16)}</button></div>
+    ${urls.length > 1 ? `<div class="seg" id="qrPick" style="margin-top:10px">${urls.map((u, i) => `<button class="${i ? "" : "on"}" data-u="${esc(u)}">${esc(u.replace(/^https?:\/\//, ""))}</button>`).join("")}</div>` : ""}
+    <p class="muted" style="font-size:13px;margin:14px 0 0">手机连上和这台台式机<b>同一个 Wi-Fi</b>，用相机或微信扫一扫。</p>
+    <div class="qrsteps">
+      <div><b>iPhone</b>用 Safari 打开 → 底部分享按钮 → “添加到主屏幕”，之后像 App 一样全屏打开</div>
+      <div><b>安卓</b>用 Chrome 打开 → 右上角 ⋮ → “添加到主屏幕”，桌面上会出现橙光球图标</div>
+    </div></div>`);
+  render(urls[0]);
+  body.querySelector("#qrCopy").onclick = () => navigator.clipboard?.writeText($("qrUrl").textContent).then(() => toast("已复制", "ok", 1500));
+  body.querySelector("#qrPick")?.addEventListener("click", e => {
+    const b = e.target.closest("[data-u]"); if (!b) return;
+    body.querySelectorAll("#qrPick button").forEach(x => x.classList.toggle("on", x === b));
+    render(b.dataset.u);
+  });
 }
 
 // ---------- 命令面板（⌘K / Ctrl+K） ----------
@@ -1075,6 +1202,7 @@ function paletteActions() {
     ["puzzle", "选择技能", "", () => openSkillPop()],
     ["upload", "提交新技能", "", () => loadSkills().then(openMySkills)],
     ["user", "更换头像", "", pickAvatar],
+    ["phone", "在手机上打开", "", () => showMobile()],
     [store.get("theme") === "dark" ? "sun" : "moon", "切换主题", "", () => { $("userMenu").hidden = true; const o = ["auto", "light", "dark"], c = store.get("theme") || "auto", n = o[(o.indexOf(c) + 1) % 3]; store.set("theme", n); applyTheme(n); toast("主题：" + THEMES[n][0]); }],
     ["key", "修改密码", "", changePassword],
   ];

@@ -25,11 +25,13 @@ from pydantic import BaseModel
 import files_api
 import skills_api
 from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, PORT, WS_ROOT,
-                   adopt_orphans, avatar_of, board_user, check_password, current_user, db, find_claude, first_admin,
+                   adopt_orphans, avatar_of, get_setting, set_setting, board_user, check_password, current_user, db, find_claude, first_admin,
                    get_user, hash_password, is_admin, is_local, issue_token, jdump, posix_rule_path,
                    require_admin, require_internal, session_for, session_workspace, user_public)
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
+LOGS = DATA / "logs"
+LOGS.mkdir(exist_ok=True)
 TASK_TIMEOUT = float(os.environ.get("CLAUDE_TASK_TIMEOUT", "3600"))
 APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT", "1800"))
 
@@ -37,16 +39,46 @@ APPROVAL_TIMEOUT = float(os.environ.get("APPROVAL_TIMEOUT", "1800"))
 # 用 DeepSeek 等第三方模型时 WebSearch 不可用，所以不放进来。
 READ_TOOLS = ["Read", "Glob", "Grep", "WebFetch", "Skill"]
 SAFE_BASH = [
-    "Bash(ls:*)", "Bash(pwd)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(ls:*)", "Bash(pwd)", "Bash(cd:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
     "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
 ]
 EDIT_TOOLS = ["Edit", "Write"]
+# 技能工具：提交的技能要管理员审核才生效，所以自动放行
+SKILL_TOOLS = ["mcp__center__skill_list", "mcp__center__skill_checkout", "mcp__center__skill_submit"]
+DEFAULT_BASH_ALLOW = ["python", "py", "pip", "unzip", "tar"]  # 严格档下额外自动放行的命令
+# 标准档下仍要确认的危险命令（删除、移动、格式化、改系统、强制推送等）
+DEFAULT_ASK_CMDS = ["rm", "rmdir", "del", "erase", "rd", "mv", "move", "Remove-Item", "ri", "Move-Item",
+                    "format", "diskpart", "shutdown", "reboot", "reg", "taskkill", "chmod", "chown", "icacls", "takeown",
+                    "git push", "git reset", "git clean", "git checkout --", "net user", "sc"]
+
+
+def perm_mode() -> str:
+    """权限档位：standard 标准（默认，只有危险命令要确认）/ strict 严格（只读命令以外都要确认）"""
+    return get_setting("perm_mode", "standard")
+
+
+def _cmd_rules(cmds) -> list[str]:
+    rules = []
+    for cmd in cmds:
+        cmd = cmd.strip()
+        if cmd and not any(c in cmd for c in "()\n"):
+            rules += [f"Bash({cmd})", f"Bash({cmd}:*)"]
+    return rules
+
+
+def bash_allow_rules() -> list[str]:
+    """严格档：管理员设置的自动放行命令 → Claude Code 规则，比如 python → Bash(python:*)"""
+    return _cmd_rules(get_setting("bash_allow", DEFAULT_BASH_ALLOW))
 
 WEB_HINT = (
     "用户在电脑上和你对话，用户名：{user}。工作目录是团队共用的文件库，回答用中文。"
     "删除、移动文件和执行命令会弹窗让用户确认；被拒绝时不要换个方式重试同样的操作，先问用户。"
     "用户上传的本机文件在“工作区”里（消息里会给出完整路径），处理结果如果要还给用户，直接改那些文件或在同一文件夹里新建，"
     "用户可以一键同步回自己的电脑。不要访问其他用户的工作区。"
+    "用户想新建或修改团队技能（skill）时：先用 skill_checkout 取出（新建时 name 留空拿到草稿文件夹），"
+    "在工作区里改好，再用 skill_submit 提交并写清更新说明；提交后要管理员审核才生效，不要直接改技能库或插件目录。"
+    "这台电脑是 Windows，命令通过 Git Bash 执行：python 不能用时试 py；没有 unzip 时用 tar -xf 文件.zip 或 "
+    "powershell -Command \"Expand-Archive 文件.zip 目标文件夹\"；文件路径用正斜杠或加引号。"
 )
 VOICE_HINT = (
     "用户是通过一块 2 寸小屏幕的语音助手给你下指令的，指令经过语音识别和另一个助手转述，可能有错字。"
@@ -198,27 +230,32 @@ def build_command(claude_bin: str, sess: dict, owner: dict, extra_dirs: list[Pat
         cmd += ["--add-dir", d]
     if plugin := skills_api.plugin_dir_for(owner):
         cmd += ["--plugin-dir", str(plugin)]
+    # 工具服务（权限确认 + 技能工具）每次都加载，完全放行时也能用技能工具
+    mcp_config = DATA / "mcp" / f"{sess['id']}.json"
+    mcp_config.write_text(json.dumps({"mcpServers": {"center": {
+        "command": sys.executable,
+        "args": [str(BASE / "approval_mcp.py")],
+        "env": {
+            "CENTER_URL": f"http://127.0.0.1:{PORT}",
+            "CENTER_TOKEN": INTERNAL_TOKEN,
+            "CENTER_SESSION": sess["id"],
+            "PYTHONUTF8": "1",
+        },
+    }}}), encoding="utf-8")
+    cmd += ["--mcp-config", str(mcp_config)]
     if sess["bypass"] and can_bypass(owner) and sess["source"] != "voice":
         cmd += ["--permission-mode", "bypassPermissions"]
+    elif perm_mode() == "strict":
+        # 严格：只读命令 + 白名单自动放行；语音会话改文件也要确认
+        auto = READ_TOOLS + SAFE_BASH + SKILL_TOOLS + bash_allow_rules() + ([] if sess["source"] == "voice" else EDIT_TOOLS)
+        cmd += ["--permission-prompt-tool", "mcp__center__approve", "--allowedTools", *auto]
     else:
-        # 语音会话改文件也要确认；网页会话改文件自动放行
-        auto = READ_TOOLS + SAFE_BASH + ([] if sess["source"] == "voice" else EDIT_TOOLS)
-        mcp_config = DATA / "mcp" / f"{sess['id']}.json"
-        mcp_config.write_text(json.dumps({"mcpServers": {"center": {
-            "command": sys.executable,
-            "args": [str(BASE / "approval_mcp.py")],
-            "env": {
-                "CENTER_URL": f"http://127.0.0.1:{PORT}",
-                "CENTER_TOKEN": INTERNAL_TOKEN,
-                "CENTER_SESSION": sess["id"],
-                "PYTHONUTF8": "1",
-            },
-        }}}), encoding="utf-8")
-        cmd += [
-            "--mcp-config", str(mcp_config),
-            "--permission-prompt-tool", "mcp__center__approve",
-            "--allowedTools", *auto,
-        ]
+        # 标准：读、改、运行命令都自动放行，只有危险命令走确认（ask 规则优先于 allow）
+        settings = DATA / "mcp" / f"settings_{sess['id']}.json"
+        settings.write_text(json.dumps({"permissions": {"ask": _cmd_rules(get_setting("ask_cmds", DEFAULT_ASK_CMDS))}},
+                                       ensure_ascii=False), encoding="utf-8")
+        auto = READ_TOOLS + ["Bash", "PowerShell", "NotebookEdit", "MultiEdit"] + EDIT_TOOLS + SKILL_TOOLS
+        cmd += ["--settings", str(settings), "--permission-prompt-tool", "mcp__center__approve", "--allowedTools", *auto]
     if sess["claude_session"]:
         cmd += ["--resume", sess["claude_session"]]
     return cmd
@@ -230,18 +267,24 @@ def run_claude(run: "Run", prompt: str, cmd: list[str], cwd: str, emit) -> dict:
         cmd,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", cwd=cwd,
-        # 等人确认可能要很久，放宽 MCP 工具调用的超时
-        env={**os.environ, "MCP_TOOL_TIMEOUT": str(int(APPROVAL_TIMEOUT * 1000) + 60000)},
+        # 等人确认可能要很久，放宽 MCP 工具调用的超时；Windows 上 Python 启动慢，工具服务的启动等待也放宽
+        env={**os.environ, "MCP_TOOL_TIMEOUT": str(int(APPROVAL_TIMEOUT * 1000) + 60000), "MCP_TIMEOUT": "60000"},
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     run.proc = proc
     # stderr 要单独读走，否则输出多了会把管道塞满，claude 卡住不动
     err_tail: list[str] = []
 
+    log_path = LOGS / f"claude_{run.sid}.log"
+    log = open(log_path, "a", encoding="utf-8", errors="replace")
+    log.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n{' '.join(cmd[:3])} …\n")
+
     def drain():
-        for line in proc.stderr:
+        for line in proc.stderr:  # claude 和确认工具的报错都在这里，写进日志方便排查
             err_tail.append(line)
             del err_tail[:-50]
+            log.write(line)
+            log.flush()
     drainer = threading.Thread(target=drain, daemon=True)
     drainer.start()
     timer = threading.Timer(TASK_TIMEOUT, lambda: (setattr(run, "timed_out", True), _kill_tree(proc)))
@@ -267,6 +310,13 @@ def run_claude(run: "Run", prompt: str, cmd: list[str], cwd: str, emit) -> dict:
                     text = inner.get("delta", {}).get("text")
                     if text:
                         emit({"type": "delta", "text": text})
+            elif kind == "user":
+                for block in ev.get("message", {}).get("content", []) or []:
+                    if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                        text = json.dumps(block.get("content"), ensure_ascii=False)
+                        if "Permission prompt tool" in text and "warn_perm" not in run.warnings:
+                            run.warnings.append("warn_perm")
+                            log.write("确认通道出错：" + text[:500] + "\n")
             elif kind == "assistant":
                 for block in ev.get("message", {}).get("content", []):
                     if block.get("type") == "tool_use":
@@ -278,6 +328,8 @@ def run_claude(run: "Run", prompt: str, cmd: list[str], cwd: str, emit) -> dict:
         drainer.join(2)
     finally:
         timer.cancel()
+        log.write(f"退出码 {proc.returncode}\n")
+        log.close()
     if not final.get("type"):
         err = "".join(err_tail).strip()[-300:]
         final = {**final, "is_error": True, "result": err or f"claude 异常退出（退出码 {proc.returncode}）"}
@@ -297,6 +349,7 @@ class Run:
         self.ok = False
         self.stopped = False
         self.timed_out = False
+        self.warnings: list[str] = []
         self.done = asyncio.Event()
 
 
@@ -380,6 +433,9 @@ async def _drive(run: Run, prompt: str, cmd: list[str], cwd: str) -> None:
         run.reply = final.get("result") or run.text
         add_message(run.sid, "assistant", run.reply, meta)
 
+    if "warn_perm" in run.warnings:
+        add_message(run.sid, "event", "⚠ 这一轮里权限确认通道出了故障，需要确认的操作没有执行。重发一次通常就好；"
+                                      f"反复出现请把 data/logs/claude_{run.sid}.log 发给管理员。")
     for a in pending_for(run.sid):
         if not a["future"].done():
             a["future"].set_result((False, "任务已结束"))
@@ -568,6 +624,81 @@ def admin_delete_user(uid: int, admin: dict = Depends(require_admin)):
     return {"ok": True}
 
 
+class SettingsBody(BaseModel):
+    perm_mode: str | None = None
+    bash_allow: list[str] | None = None
+    ask_cmds: list[str] | None = None
+
+
+def _clean_cmds(cmds: list[str]) -> list[str]:
+    out = []
+    for c in cmds:
+        c = " ".join(c.split())[:60]
+        if c and not any(x in c for x in "()") and c not in out:
+            out.append(c)
+    return out[:100]
+
+
+@app.get("/api/admin/settings")
+def admin_get_settings(admin: dict = Depends(require_admin)):
+    return {"perm_mode": perm_mode(), "bash_allow": get_setting("bash_allow", DEFAULT_BASH_ALLOW),
+            "ask_cmds": get_setting("ask_cmds", DEFAULT_ASK_CMDS), "safe": [r[5:-1] for r in SAFE_BASH],
+            "default_ask": DEFAULT_ASK_CMDS, "default_allow": DEFAULT_BASH_ALLOW}
+
+
+@app.put("/api/admin/settings")
+def admin_put_settings(body: SettingsBody, admin: dict = Depends(require_admin)):
+    if body.perm_mode in ("standard", "strict"):
+        set_setting("perm_mode", body.perm_mode)
+    if body.bash_allow is not None:
+        set_setting("bash_allow", _clean_cmds(body.bash_allow))
+    if body.ask_cmds is not None:
+        set_setting("ask_cmds", _clean_cmds(body.ask_cmds))
+    return admin_get_settings(admin)
+
+
+def lan_urls() -> list[str]:
+    """台式机在局域网里的地址，给手机扫码用。"""
+    ips = []
+    try:  # 找默认出口网卡的地址（不会真的发数据）
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ips.append(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith(("127.", "169.254.")) and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    def rank(ip):  # 家里和公司常见的局域网网段排前面，代理软件的虚拟网卡（198.18.x）排最后
+        if ip.startswith(("192.168.", "10.")) or (ip.startswith("172.") and 16 <= int(ip.split(".")[1]) <= 31):
+            return 0
+        return 2 if ip.startswith(("198.18.", "198.19.")) else 1
+    return [f"http://{ip}:{PORT}" for ip in sorted(ips, key=rank)]
+
+
+@app.get("/api/lan")
+def lan(user: dict = Depends(current_user)):
+    return {"urls": lan_urls(), "host": f"http://{socket.gethostname()}:{PORT}"}
+
+
+@app.get("/manifest.webmanifest")
+def manifest():
+    """手机“添加到主屏幕”用"""
+    from fastapi.responses import JSONResponse
+    return JSONResponse({
+        "name": "Projector · Claude 工作台", "short_name": "Projector", "start_url": "/", "scope": "/",
+        "display": "standalone", "background_color": "#f4efe6", "theme_color": "#f4efe6", "lang": "zh-CN",
+        "icons": [{"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                  {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"},
+                  {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}],
+    }, media_type="application/manifest+json")
+
+
 @app.get("/api/admin/sessions")
 def admin_sessions(admin: dict = Depends(require_admin)):
     return [session_view(s) for s in db("SELECT * FROM sessions ORDER BY updated DESC")]
@@ -689,7 +820,7 @@ def delete_session(sid: str, user: dict = Depends(current_user)):
     db("DELETE FROM sessions WHERE id=?", (sid,))
     db("DELETE FROM links WHERE session_id=?", (sid,))
     shutil.rmtree(WS_ROOT / str(s["user_id"]) / sid, ignore_errors=True)
-    for f in (f"{sid}.json", f"hint_{sid}.txt"):
+    for f in (f"{sid}.json", f"hint_{sid}.txt", f"settings_{sid}.json"):
         (DATA / "mcp" / f).unlink(missing_ok=True)
     broadcast({"type": "session_deleted", "session_id": sid}, s["user_id"])
     return {"ok": True}

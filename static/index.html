@@ -2,14 +2,23 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Projector · Claude 工作台</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<meta name="theme-color" content="#f4efe6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#13100c" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Projector">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script src="/static/ui.js?v=0.4.0"></script>
+<script src="/static/ui.js?v=0.5.0"></script>
 <style>
 /* ============ 主题：暖纸色（浅色）/ 台灯夜色（深色） ============ */
 :root {
@@ -70,7 +79,7 @@ a { color: var(--accent); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--faint); }
-.ic { flex-shrink: 0; display: block; }
+.ic { flex-shrink: 0; display: inline-block; vertical-align: -3px; }
 kbd { font: 500 11px var(--f-mono); color: var(--muted); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; background: var(--solid); }
 .muted { color: var(--muted); }
 .serif { font-family: var(--f-display); font-weight: 400; }
@@ -492,6 +501,59 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
 .status.rejected { background: var(--rose-soft); color: var(--rose); }
 .empty-note { color: var(--muted); font-size: 14px; padding: 6px 2px; }
 
+/* ============ 技能详情、版本记录 ============ */
+.sk-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+.sk-head .big { width: 52px; height: 52px; border-radius: 16px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex-shrink: 0; }
+.sk-head h3 { margin: 0; font: 600 19px var(--f-body); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sk-head p { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
+.vtag { font: 600 11.5px var(--f-mono); padding: 1px 7px; border-radius: 6px; background: var(--ink); color: var(--bg); }
+.vtl { list-style: none; margin: 8px 0 0; padding: 0; position: relative; }
+.vtl::before { content: ""; position: absolute; left: 17px; top: 18px; bottom: 18px; width: 2px; background: linear-gradient(var(--accent), var(--line2)); border-radius: 2px; }
+.vtl li { display: flex; gap: 12px; padding: 8px 0; position: relative; animation: rise .4s var(--ease) both; }
+.vtl .vn { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; font: 600 12px var(--f-mono); background: var(--raised); border: 1.5px solid var(--line2); z-index: 1; flex-shrink: 0; }
+.vtl li.cur .vn { background: var(--accent); color: var(--accent-ink); border-color: transparent; box-shadow: 0 0 0 5px var(--accent-soft); }
+.vtl .vb { flex: 1; min-width: 0; }
+.vtl .vm { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+.vtl .vc { margin: 3px 0 6px; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+.vtl .va { display: flex; gap: 6px; }
+.cbadge { font-size: 10.5px; font-weight: 700; border-radius: 5px; padding: 0 5px; margin-right: 4px; }
+.cbadge.add { background: color-mix(in srgb, var(--sage) 16%, transparent); color: var(--sage); }
+.cbadge.mod { background: var(--amber-soft); color: var(--amber); }
+.cbadge.del { background: var(--rose-soft); color: var(--rose); }
+.changelog { background: var(--accent-soft); border-radius: 12px; padding: 10px 14px; margin-bottom: 12px; font-size: 14px; white-space: pre-wrap; }
+.changelog b { display: block; font-size: 11.5px; letter-spacing: .1em; color: var(--accent2); margin-bottom: 2px; }
+
+/* 手机扫码 */
+.qrwrap { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.qrcard { position: relative; padding: 18px; border-radius: 24px; background: #fffdf8; box-shadow: var(--shadow-lg); animation: dlg .5s var(--spring); }
+.qrcard svg { display: block; width: 228px; height: 228px; }
+.qrcard .orb { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.qrcard::after { content: ""; position: absolute; inset: -1px; border-radius: 25px; pointer-events: none; box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); animation: qrglow 2.6s ease-out infinite; }
+@keyframes qrglow { 70% { box-shadow: 0 0 0 16px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.qrurl { margin-top: 18px; font: 500 15px var(--f-mono); display: flex; gap: 8px; align-items: center; }
+.qrsteps { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; text-align: left; width: 100%; }
+.qrsteps div { background: var(--code); border-radius: 12px; padding: 10px 12px; font-size: 12.5px; color: var(--ink2); }
+.qrsteps b { display: block; font-size: 13px; margin-bottom: 2px; color: var(--ink); }
+
+/* 设置 */
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.mode { border: 1.5px solid var(--line2); border-radius: 16px; padding: 14px 16px; cursor: pointer; transition: border-color .2s, background .2s, transform .3s var(--spring); position: relative; }
+.mode:hover { transform: translateY(-2px); }
+.mode.on { border-color: var(--accent); background: var(--accent-soft); }
+.mode.on::after { content: "✓"; position: absolute; right: 12px; top: 10px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); font-size: 12px; display: grid; place-items: center; animation: pop .3s var(--spring); }
+.mode > b { font-size: 15px; display: flex; gap: 8px; align-items: center; }
+.mode p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+.tagbox { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; border: 1px solid var(--line2); border-radius: 12px; background: var(--solid); margin-top: 8px; }
+.tagbox .chip { font-family: var(--f-mono); }
+.tagbox input { border: 0; outline: none; background: none; min-width: 140px; flex: 1; font: 13px var(--f-mono); }
+
+/* iPhone 刘海和底部横条 */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .composer { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .top { padding-top: max(12px, env(safe-area-inset-top)); }
+  aside { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+}
+
 /* ============ 窄屏 ============ */
 @media (max-width: 860px) {
   .auth { grid-template-columns: 1fr; }
@@ -521,6 +583,7 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
   .filev { flex-direction: column; }
   .filev .list { width: 100%; }
   .ava-grid { grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .modes, .qrsteps { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
@@ -619,7 +682,7 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
   <header><strong>管理后台</strong>
     <span class="seg" id="adminTabs">
       <button data-tab="users" class="on">用户</button><button data-tab="chats">聊天记录</button>
-      <button data-tab="library">技能库</button><button data-tab="review">待审核 <span id="pendingCount"></span></button>
+      <button data-tab="library">技能库</button><button data-tab="review">待审核 <span id="pendingCount"></span></button><button data-tab="settings">设置</button>
     </span>
     <button class="iconbtn closebtn" data-close></button>
   </header>
@@ -663,7 +726,7 @@ details.grp .list { padding: 0 8px 8px; animation: down .3s var(--ease); }
   </section>
 </div></div>
 
-<script src="/static/app.js?v=0.4.0"></script>
-<script src="/static/admin.js?v=0.4.0"></script>
+<script src="/static/app.js?v=0.5.0"></script>
+<script src="/static/admin.js?v=0.5.0"></script>
 </body>
 </html>

@@ -44,6 +44,11 @@ const ICON_PATHS = {
   bolt: "M13 3L5 13.5h6L10 21l8-10.5h-6z",
   clock: "M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17zM12 7.5V12l3 2",
   stop: "M7 7h10v10H7z",
+  phone: "M8 2.5h8A1.5 1.5 0 0 1 17.5 4v16a1.5 1.5 0 0 1-1.5 1.5H8A1.5 1.5 0 0 1 6.5 20V4A1.5 1.5 0 0 1 8 2.5zM11 18.5h2",
+  history: "M3.5 12a8.5 8.5 0 1 0 2.5-6M3.5 4v4h4M12 7.5V12l3 2",
+  copy: "M9 9h10.5v10.5H9zM15 9V4.5H4.5V15H9",
+  branch: "M6 4v10M6 14a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 10c0 4-4 4-9 6",
+  shieldok: "M12 3l7.5 3v5.5c0 4.6-3.2 8.2-7.5 9.5-4.3-1.3-7.5-4.9-7.5-9.5V6zM8.5 12l2.5 2.5 4.5-5",
 };
 function icon(name, size = 18, cls = "") {
   const d = ICON_PATHS[name] || ICON_PATHS.sparkle;

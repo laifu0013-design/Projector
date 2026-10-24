@@ -25,6 +25,7 @@
       if (t === "users") await renderUsers();
       else if (t === "chats") await renderChats();
       else if (t === "library") await renderLibrary();
+      else if (t === "settings") await renderSettings();
       else await renderReview();
     } catch (e) { box().innerHTML = `<div class="err">${esc(e.message)}</div>`; }
     refreshPending();
@@ -157,7 +158,7 @@
       </div>` : ""}
       ${lib.length ? "" : `<div style="text-align:center;padding:30px 0">${orb(56)}<p class="muted">技能库是空的。同事提交的 skill 审核通过后会出现在这里。</p></div>`}
       ${lib.map((s, i) => `<div class="card" data-skill="${esc(s.name)}" style="animation-delay:${i * 40}ms">
-        <h4>${icon("puzzle", 16)}${esc(s.name)}</h4>
+        <h4>${icon("puzzle", 16)}${esc(s.name)} <span class="vtag">v${s.version || 1}</span>${s.pending ? ` <span class="tag warn">${s.pending} 个新版本待审核</span>` : ""}</h4>
         <div class="muted" style="font-size:13px">${esc(s.description)}</div>
         <div class="muted" style="font-size:12px;margin-top:2px">提交人：${esc(s.submitter || "—")} · 更新：${ftime(s.updated)}</div>
         <div class="users-pick">
@@ -165,6 +166,7 @@
           ${people.map(u => `<label class="upick"><input type="checkbox" data-u="${u.id}" ${s.users.includes(u.id) ? "checked" : ""} ${s.everyone ? "disabled" : ""}>${avatarEl(u.avatar, 22)}${esc(u.display_name)}</label>`).join("")}
         </div>
         <div style="margin-top:10px;display:flex;gap:6px;align-items:center">
+          <button class="btn small" data-hist>${icon("history", 14)}版本记录</button>
           <button class="btn small" data-view>${icon("eye", 14)}查看文件</button>
           <button class="btn small ghost danger" data-remove>${icon("trash", 14)}从库里删除</button>
           <span class="muted" style="font-size:12px;margin-left:auto">管理员默认都能用</span>
@@ -185,6 +187,7 @@
         catch (e) { toast(e.message, "err"); }
       };
       card.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = save);
+      card.querySelector("[data-hist]").onclick = () => openSkillDetail(name);
       card.querySelector("[data-view]").onclick = async () => {
         const d = await api(`/api/admin/library/${name}/files`);
         fileViewer(`技能 ${name} 的文件`, d.files);
@@ -198,29 +201,14 @@
     });
   }
 
-  // 审核和查看用：左边文件列表，右边内容
-  function fileViewer(title, files, buttons = [], extraHtml = "") {
-    const body = dialog(title, `${extraHtml}<div class="filev"><div class="list">${files.map((f, i) =>
-      `<div data-i="${i}">${/\.(py|sh|bat|cmd|ps1|js|ts|exe|dll)$/i.test(f.path) ? '<span class="status pending">脚本</span> ' : ""}${esc(f.path)} <span class="muted" style="font-size:11.5px">${fsize(f.size)}</span></div>`).join("")}</div>
-      <pre id="fvPre">选左边的文件查看内容</pre></div>`, buttons, true);
-    const pick = i => {
-      const f = files[i];
-      body.querySelectorAll(".list div").forEach(d => d.classList.toggle("on", +d.dataset.i === i));
-      body.querySelector("#fvPre").textContent = f.text == null ? `（二进制文件，${fsize(f.size)}，不能显示）` : f.text + (f.truncated ? "\n……（太长，已截断）" : "");
-    };
-    body.querySelector(".list").onclick = e => { const d = e.target.closest("[data-i]"); if (d) pick(+d.dataset.i); };
-    const first = files.findIndex(f => f.path === "SKILL.md");
-    if (files.length) pick(first >= 0 ? first : 0);
-    return body;
-  }
-
   // ---------- 待审核 ----------
 
   async function renderReview() {
     const subs = await refreshPending();
     const st = { pending: "待审核", approved: "已入库", rejected: "未通过" };
     const pending = subs.filter(s => s.status === "pending"), done = subs.filter(s => s.status !== "pending");
-    const card = (s, i) => `<div class="card" style="animation-delay:${i * 40}ms"><h4>${avatarEl(userOf(s.submitted_by).avatar, 26)}${esc(s.name)} <span class="status ${s.status}">${st[s.status]}</span></h4>
+    const card = (s, i) => `<div class="card" style="animation-delay:${i * 40}ms"><h4>${avatarEl(userOf(s.submitted_by).avatar, 26)}${esc(s.name)} <span class="status ${s.status}">${st[s.status]}</span>${s.current_version && s.status === "pending" ? ` <span class="vtag">更新 v${s.current_version}</span>` : ""}</h4>
+      ${s.changelog ? `<div style="font-size:13.5px;margin:2px 0">${esc(s.changelog)}</div>` : ""}
       <div class="muted" style="font-size:13px">${esc(s.description)}</div>
       <div class="muted" style="font-size:12px;margin-top:2px">提交人：${esc(s.submitter || "—")} · ${ftime(s.created)}${s.note ? " · 备注：" + esc(s.note) : ""}</div>
       <div style="margin-top:10px;display:flex;gap:6px">
@@ -247,12 +235,59 @@
       toast(approve ? `已入库：${s.name}。到“技能库”里分配给需要的人` : "已退回", approve ? "ok" : "info");
       show(approve ? "library" : "review");
     };
+    const ch = d.changes;
+    const summary = ch ? [["新增", ch.added.length], ["修改", ch.modified.length], ["删除", ch.removed.length]].filter(x => x[1]).map(x => x.join(" ")).join("，") || "文件没有变化" : "";
     fileViewer(`审核技能：${s.name}`, d.files,
-      pending ? [{ label: "退回", icon: "x", danger: true, onClick: decide(false) }, { label: "通过并入库", icon: "check", primary: true, onClick: decide(true) }] : [],
+      pending ? [{ label: "退回", icon: "x", danger: true, onClick: decide(false) }, { label: d.updates_existing ? `通过，发布为 v${d.current_version + 1}` : "通过并入库", icon: "check", primary: true, onClick: decide(true) }] : [],
       `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">${avatarEl(userOf(s.submitted_by).avatar, 36)}<div>
-        <div><b>${esc(s.submitter || userOf(s.submitted_by).display_name)}</b> 提交 · ${d.files.length} 个文件${d.updates_existing ? ' · <span class="status pending">会覆盖库里同名的技能</span>' : ""}</div>
+        <div><b>${esc(s.submitter || userOf(s.submitted_by).display_name)}</b> 提交 · ${d.files.length} 个文件
+          ${d.updates_existing ? ` · <span class="status pending">更新 v${d.current_version} → v${d.current_version + 1}：${summary}</span>` : ' · <span class="status approved">新技能</span>'}</div>
         <div class="muted" style="font-size:13px">${esc(s.description)}</div></div></div>
-       ${pending ? '<input class="field" id="rvNote" placeholder="给提交人的备注（可选）" style="margin-bottom:10px">' : ""}`);
+       <div class="changelog"><b>更新说明</b>${esc(s.changelog || "（没写）")}</div>
+       ${pending ? '<input class="field" id="rvNote" placeholder="给提交人的备注（可选）" style="margin-bottom:10px">' : ""}`, ch);
+  }
+
+  // ---------- 设置：权限档位、命令名单 ----------
+
+  async function renderSettings() {
+    const st = await api("/api/admin/settings");
+    const tagEditor = (key, list, def, hint) => `
+      <div class="tagbox" data-key="${key}">${list.map(c => `<span class="chip">${esc(c)}<button data-rm="${esc(c)}">${icon("x", 11)}</button></span>`).join("")}
+        <input placeholder="${esc(hint)}，回车添加"></div>
+      <div style="margin-top:6px;display:flex;gap:8px"><button class="btn small ghost" data-reset="${key}">恢复默认</button></div>`;
+    box().innerHTML = `
+      <div style="font-weight:600;margin-bottom:10px">权限档位 <span class="muted" style="font-weight:400;font-size:13px">对所有人生效；“完全放行”在“用户”里按人开通</span></div>
+      <div class="modes">
+        <div class="mode ${st.perm_mode === "standard" ? "on" : ""}" data-mode="standard"><b>${icon("bolt", 17)}标准（推荐）</b>
+          <p>读文件、改文件、运行 python / unzip 等命令都直接执行，只有删除、移动、格式化这类<b>危险命令</b>才弹确认。适合不懂技术的同事。</p></div>
+        <div class="mode ${st.perm_mode === "strict" ? "on" : ""}" data-mode="strict"><b>${icon("shield", 17)}严格</b>
+          <p>只有 ls、cat 等只读命令和下面白名单里的命令自动执行，其他所有操作都要确认。</p></div>
+      </div>
+      <div class="card" style="margin-top:16px" ${st.perm_mode === "standard" ? "" : "hidden"}>
+        <h4>${icon("alert", 16)}标准档：仍然要确认的命令</h4>
+        <div class="muted" style="font-size:13px">命令以这些开头时会弹确认，比如写 <code>rm</code> 会拦住 <code>rm -rf 文件夹</code>。注意：用 python 脚本删文件这类间接操作拦不住。</div>
+        ${tagEditor("ask_cmds", st.ask_cmds, st.default_ask, "比如 git push")}
+      </div>
+      <div class="card" style="margin-top:16px" ${st.perm_mode === "strict" ? "" : "hidden"}>
+        <h4>${icon("check", 16)}严格档：额外自动放行的命令</h4>
+        <div class="muted" style="font-size:13px">已默认放行：${st.safe.map(c => `<code>${esc(c)}</code>`).join(" ")}</div>
+        ${tagEditor("bash_allow", st.bash_allow, st.default_allow, "比如 python")}
+      </div>`;
+    const save = async patch => { try { await post("/api/admin/settings", patch, "PUT"); toast("已保存，新的对话开始生效", "ok", 2000); } catch (e) { toast(e.message, "err"); } show("settings"); };
+    box().querySelectorAll("[data-mode]").forEach(m => m.onclick = () => { if (!m.classList.contains("on")) save({ perm_mode: m.dataset.mode }); });
+    box().querySelectorAll(".tagbox").forEach(tb => {
+      const key = tb.dataset.key, list = st[key];
+      tb.querySelector("input").onkeydown = e => {
+        if (e.key !== "Enter" || e.isComposing) return;
+        const v = e.target.value.trim(); if (!v) return;
+        save({ [key]: [...list, v] });
+      };
+      tb.onclick = e => { const rm = e.target.closest("[data-rm]"); if (rm) save({ [key]: list.filter(c => c !== rm.dataset.rm) }); };
+    });
+    box().querySelectorAll("[data-reset]").forEach(b => b.onclick = () => {
+      const key = b.dataset.reset;
+      if (confirm("恢复成默认名单？")) save({ [key]: key === "ask_cmds" ? st.default_ask : st.default_allow });
+    });
   }
 
   $("adminTabs").onclick = e => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); };
