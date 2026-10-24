@@ -4,38 +4,47 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude 工作台 - 设置</title>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: light dark; --bg: #f5f4ef; --card: #fff; --fg: #1f1e1d; --muted: #6b6a66; --line: #dcd9d0; --accent: #d97757; --err: #c0392b; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #1f1e1d; --card: #2a2927; --fg: #eeece6; --muted: #a3a19b; --line: #44423e; } }
+  :root { color-scheme: light dark; --bg: #f4efe6; --card: #fffdf8; --fg: #201b15; --muted: #8c8477; --line: rgba(70,50,25,.14); --accent: #e8692e; --accent2: #c24f1c; --err: #c2412f; --soft: rgba(232,105,46,.11); }
+  @media (prefers-color-scheme: dark) { :root { --bg: #13100c; --card: #1d1914; --fg: #f3ece0; --muted: #968c7d; --line: rgba(255,230,195,.12); --accent: #ff8a4c; --accent2: #ffab78; --err: #f2907f; --soft: rgba(255,138,76,.13); } }
   * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
-         font: 15px/1.6 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; padding: 16px; }
-  .card { width: 100%; max-width: 480px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  p.sub { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
-  label { display: block; font-weight: 600; margin: 16px 0 6px; }
-  input[type=text] { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; font: inherit; }
-  input[type=text]:focus { outline: 2px solid var(--accent); border-color: transparent; }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg); overflow: hidden;
+         font: 15px/1.6 "Figtree", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; padding: 16px; }
+  body::before { content: ""; position: fixed; width: 60vw; height: 60vw; right: -15vw; top: -20vw; border-radius: 50%; background: #ffb37a; filter: blur(100px); opacity: .4; animation: drift 24s ease-in-out infinite alternate; }
+  @keyframes drift { to { transform: translate(-8vw, 6vw) scale(1.1); } }
+  .card { position: relative; width: 100%; max-width: 480px; background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 30px; box-shadow: 0 30px 80px -24px rgba(50,30,10,.35); animation: rise .6s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+  .orb { width: 44px; height: 44px; border-radius: 50%; margin-bottom: 14px; background: radial-gradient(circle at 34% 28%, #fff7dc 0 7%, #ffc56c 20%, #f37b2f 55%, #b5401b 100%); box-shadow: 0 0 26px rgba(243,123,47,.5); animation: breathe 4.5s ease-in-out infinite; }
+  @keyframes breathe { 50% { transform: scale(1.07); } }
+  h1 { font: italic 400 34px/1.1 "Instrument Serif", serif; margin: 0 0 6px; }
+  p.sub { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; }
+  label { display: block; font-weight: 600; font-size: 13px; margin: 16px 0 6px; }
+  input[type=text] { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: transparent; color: inherit; font: inherit; outline: none; transition: border-color .2s, box-shadow .2s; }
+  input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--soft); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 5px; }
   .check { display: flex; gap: 8px; align-items: flex-start; font-weight: 600; margin-top: 20px; cursor: pointer; }
-  .check input { margin-top: 5px; }
-  #serverBox { display: none; border-left: 3px solid var(--line); padding-left: 12px; }
-  button { margin-top: 24px; width: 100%; padding: 10px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: .6; cursor: default; }
+  .check input { margin-top: 5px; accent-color: var(--accent); }
+  #serverBox { display: none; border-left: 3px solid var(--soft); padding-left: 12px; }
+  button { margin-top: 24px; width: 100%; padding: 11px; border: 0; border-radius: 12px; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font: inherit; font-weight: 600; cursor: pointer; box-shadow: 0 10px 24px -10px var(--accent); transition: transform .2s; }
+  button:hover { transform: translateY(-1px); }
+  button:disabled { opacity: .6; cursor: default; transform: none; }
   #status { min-height: 1.6em; margin-top: 12px; font-size: 13px; }
   #status.err { color: var(--err); }
   .found { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-  .found button { margin: 0; text-align: left; background: transparent; color: inherit; border: 1px solid var(--line); font-weight: 400; display: flex; justify-content: space-between; }
-  .found button:hover, .found button.on { border-color: var(--accent); }
-  .found .u { color: var(--muted); font-size: 13px; }
+  .found button { margin: 0; text-align: left; background: transparent; color: inherit; border: 1px solid var(--line); font-weight: 500; display: flex; justify-content: space-between; box-shadow: none; border-radius: 11px; animation: rise .4s both; }
+  .found button:hover, .found button.on { border-color: var(--accent); background: var(--soft); transform: none; }
+  .found .u { color: var(--muted); font-size: 13px; font-weight: 400; }
   .row { display: flex; align-items: center; gap: 8px; margin: 16px 0 6px; }
   .row label { margin: 0; flex: 1; }
-  .link { background: none; border: 0; color: var(--accent); width: auto; margin: 0; padding: 0; font-weight: 400; font-size: 13px; }
+  .link { background: none; border: 0; color: var(--accent); width: auto; margin: 0; padding: 0; font-weight: 500; font-size: 13px; box-shadow: none; }
+  .link:hover { transform: none; text-decoration: underline; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>连接 Claude 工作台</h1>
+  <div class="orb"></div>
+  <h1>连接 Projector</h1>
   <p class="sub">选择局域网里的台式机，之后打开软件会直接进入登录页。以后可以在托盘图标的菜单里修改。</p>
 
   <div class="row"><label>局域网里的服务器</label><button class="link" id="scan">重新查找</button></div>

@@ -24,8 +24,8 @@ from pydantic import BaseModel
 
 import files_api
 import skills_api
-from store import (BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, PORT, WS_ROOT,
-                   adopt_orphans, board_user, check_password, current_user, db, find_claude, first_admin,
+from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, PORT, WS_ROOT,
+                   adopt_orphans, avatar_of, board_user, check_password, current_user, db, find_claude, first_admin,
                    get_user, hash_password, is_admin, is_local, issue_token, jdump, posix_rule_path,
                    require_admin, require_internal, session_for, session_workspace, user_public)
 
@@ -65,7 +65,8 @@ app.include_router(skills_api.router)
 def session_view(s: dict) -> dict:
     owner = get_user(s.get("user_id")) or {}
     return {**s, "running": s["id"] in RUNS, "pending": len(pending_for(s["id"])),
-            "owner": owner.get("display_name", ""), "work_dir": s.get("work_dir") or str(FILE_ROOT)}
+            "owner": owner.get("display_name", ""), "owner_avatar": avatar_of(owner) if owner else "orange",
+            "work_dir": s.get("work_dir") or str(FILE_ROOT)}
 
 
 def push_session(sid: str) -> None:
@@ -395,6 +396,11 @@ class Credentials(BaseModel):
     display_name: str = ""
 
 
+class MePatch(BaseModel):
+    avatar: str | None = None
+    display_name: str | None = None
+
+
 class ChangePassword(BaseModel):
     old: str
     new: str
@@ -453,6 +459,17 @@ def me(user: dict = Depends(current_user)):
     return me_view(user)
 
 
+@app.patch("/api/me")
+def update_me(body: MePatch, user: dict = Depends(current_user)):
+    if body.avatar is not None:
+        if body.avatar not in AVATARS:
+            raise HTTPException(400, "只能从预设头像里选")
+        db("UPDATE users SET avatar=? WHERE id=?", (body.avatar, user["id"]))
+    if body.display_name is not None and body.display_name.strip():
+        db("UPDATE users SET display_name=? WHERE id=?", (body.display_name.strip()[:32], user["id"]))
+    return me_view(get_user(user["id"]))
+
+
 @app.post("/api/me/password")
 def change_password(body: ChangePassword, user: dict = Depends(current_user)):
     if not check_password(body.old, user["pw_hash"]):
@@ -466,6 +483,7 @@ def change_password(body: ChangePassword, user: dict = Depends(current_user)):
 
 class UserPatch(BaseModel):
     display_name: str | None = None
+    avatar: str | None = None
     password: str | None = None
     role: str | None = None
     can_bypass: bool | None = None
@@ -503,9 +521,13 @@ def admin_create_user(body: Credentials, admin: dict = Depends(require_admin)):
 def admin_update_user(uid: int, body: UserPatch, admin: dict = Depends(require_admin)):
     u = _target_user(uid)
     if u["role"] == "device" and (body.role or body.password or body.disabled):
-        raise HTTPException(400, "板子账号不能登录，只能改名字和技能")
+        raise HTTPException(400, "板子账号不能登录，只能改名字、头像和技能")
     if body.display_name is not None:
         db("UPDATE users SET display_name=? WHERE id=?", (body.display_name.strip()[:32] or u["username"], uid))
+    if body.avatar is not None:
+        if body.avatar not in AVATARS:
+            raise HTTPException(400, "只能从预设头像里选")
+        db("UPDATE users SET avatar=? WHERE id=?", (body.avatar, uid))
     if body.password:
         _check_new_password(body.password)
         db("UPDATE users SET pw_hash=? WHERE id=?", (hash_password(body.password), uid))

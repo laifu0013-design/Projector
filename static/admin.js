@@ -7,19 +7,19 @@
   const box = () => $("adminContent");
 
   async function loadUsers() { users = await api("/api/admin/users"); return users; }
-  const userName = id => (users.find(u => u.id === id) || {}).display_name || ("#" + id);
+  const userOf = id => users.find(u => u.id === id) || { display_name: "#" + id, avatar: "orange" };
 
   async function refreshPending() {
     const subs = await api("/api/skills/submissions").catch(() => []);
     const n = subs.filter(s => s.status === "pending").length;
-    $("pendingCount").textContent = n ? `(${n})` : "";
+    $("pendingCount").innerHTML = n ? `<span class="tag warn">${n}</span>` : "";
     return subs;
   }
 
   async function show(t) {
     tab = t;
     $("adminTabs").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
-    box().innerHTML = '<div class="meta">读取中…</div>';
+    box().innerHTML = '<div class="empty-note">读取中…</div>';
     try {
       await loadUsers();
       if (t === "users") await renderUsers();
@@ -33,41 +33,52 @@
   // ---------- 用户 ----------
 
   async function renderUsers() {
+    const [all, subs] = await Promise.all([api("/api/admin/sessions"), refreshPending()]);
+    const today = new Date(new Date().toDateString()) / 1000;
+    const people = users.filter(u => u.role !== "device");
+    const stats = [
+      ["users", "账号", people.length],
+      ["chat", "今天的会话", all.filter(s => s.updated >= today).length],
+      ["bolt", "正在干活", all.filter(s => s.running).length],
+      ["puzzle", "待审核技能", subs.filter(s => s.status === "pending").length],
+    ];
     box().innerHTML = `
-      <div class="card"><h4>新建账号</h4>
-        <div class="form" style="flex-direction:row;flex-wrap:wrap;align-items:center">
-          <input id="nuUser" placeholder="用户名（登录用）" style="width:160px">
-          <input id="nuName" placeholder="显示的名字" style="width:140px">
-          <input id="nuPwd" placeholder="初始密码（至少 6 位）" style="width:180px">
+      <div class="stats">${stats.map(([ic, l, v]) => `<div class="stat">${icon(ic, 18)}<div class="v" data-count="${v}">0</div><div class="l">${l}</div></div>`).join("")}</div>
+      <div class="card"><h4>${icon("plus", 16)}新建账号</h4>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+          <input class="field" id="nuUser" placeholder="用户名（登录用）" style="width:170px">
+          <input class="field" id="nuName" placeholder="显示的名字" style="width:150px">
+          <input class="field" id="nuPwd" placeholder="初始密码（至少 6 位）" style="width:190px">
           <button class="btn primary" id="nuBtn">创建</button>
         </div>
         <div class="err" id="nuErr"></div>
-        <div class="meta">同事那边只能登录、不能注册。把用户名和初始密码告诉同事，他们登录后可以自己改密码。</div>
+        <div class="muted" style="font-size:12.5px">同事只能登录、不能注册。把用户名和初始密码告诉他们，登录后可以自己改密码、换头像。</div>
       </div>
-      <table class="grid"><tr><th>用户名</th><th>名字</th><th>角色</th><th title="允许打开“完全放行”">完全放行</th><th>会话</th><th>最近登录</th><th>状态</th><th></th></tr>
-      ${users.map(u => `<tr data-uid="${u.id}">
-        <td>${esc(u.username)}</td>
-        <td><a class="fpath" data-act="rename">${esc(u.display_name)}</a></td>
-        <td>${u.role === "device" ? roleName.device : `<select data-act="role"><option value="user" ${u.role === "user" ? "selected" : ""}>普通用户</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>管理员</option></select>`}</td>
-        <td>${u.role === "user" ? `<input type="checkbox" data-act="bypass" ${u.can_bypass ? "checked" : ""}>` : u.role === "admin" ? "✔" : "—"}</td>
+      <table class="grid"><tr><th>用户</th><th>角色</th><th title="允许打开“完全放行”">完全放行</th><th>会话</th><th>最近登录</th><th>状态</th><th></th></tr>
+      ${users.map((u, i) => `<tr data-uid="${u.id}" style="animation-delay:${i * 30}ms">
+        <td><div class="ucell">${avatarEl(u.avatar, 34)}<div><a class="fpath" style="font-family:var(--f-body);font-size:14px" data-act="rename">${esc(u.display_name)}</a><div class="un">@${esc(u.username)}</div></div></div></td>
+        <td>${u.role === "device" ? `<span class="tag">${roleName.device}</span>` : `<select class="mini" data-act="role"><option value="user" ${u.role === "user" ? "selected" : ""}>普通用户</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>管理员</option></select>`}</td>
+        <td>${u.role === "user" ? `<label class="switch"><input type="checkbox" data-act="bypass" ${u.can_bypass ? "checked" : ""}><span class="sw"></span></label>` : u.role === "admin" ? `<span class="muted">${icon("check", 16)}</span>` : "—"}</td>
         <td>${u.sessions}</td>
-        <td class="meta">${u.last_seen ? ftime(u.last_seen) : "—"}</td>
-        <td>${u.role === "device" ? "" : `<label class="toggle"><input type="checkbox" data-act="disabled" ${u.disabled ? "checked" : ""}> 停用</label>`}</td>
-        <td style="white-space:nowrap">${u.role === "device" ? "" : `<button class="btn small" data-act="reset">重置密码</button>`}
-            ${u.role === "device" || u.id === me.id ? "" : `<button class="btn small danger" data-act="delete">删除</button>`}</td>
+        <td class="muted" style="font-size:13px">${u.last_seen ? ftime(u.last_seen) : "—"}</td>
+        <td>${u.role === "device" ? "" : `<label class="switch"><input type="checkbox" data-act="disabled" ${u.disabled ? "checked" : ""}><span class="sw"></span>停用</label>`}</td>
+        <td style="white-space:nowrap;text-align:right">
+          ${u.role === "device" ? `<button class="btn small ghost" data-act="ava">${icon("user", 14)}头像</button>` : `<button class="btn small ghost" data-act="reset">${icon("key", 14)}重置密码</button>`}
+          ${u.role === "device" || u.id === me.id ? "" : `<button class="btn small ghost danger" data-act="delete">${icon("trash", 14)}</button>`}</td>
       </tr>`).join("")}</table>`;
+    box().querySelectorAll("[data-count]").forEach(el => countUp(el, +el.dataset.count));
     $("nuBtn").onclick = async () => {
       try {
         await post("/api/admin/users", { username: $("nuUser").value.trim(), display_name: $("nuName").value.trim(), password: $("nuPwd").value });
-        flash("已创建账号 " + $("nuUser").value.trim());
+        toast("已创建账号 " + $("nuUser").value.trim(), "ok");
         show("users");
       } catch (e) { $("nuErr").textContent = e.message; }
     };
   }
 
-  async function patchUser(uid, body) {
-    try { await post("/api/admin/users/" + uid, body, "PATCH"); flash("已保存", 1500); }
-    catch (e) { alert(e.message); }
+  async function patchUser(uid, body, msg = "已保存") {
+    try { await post("/api/admin/users/" + uid, body, "PATCH"); toast(msg, "ok", 1800); }
+    catch (e) { toast(e.message, "err"); }
     show("users");
   }
 
@@ -76,25 +87,28 @@
     if (!act || !tr || tab !== "users") return;
     const uid = +tr.dataset.uid;
     if (act === "role") patchUser(uid, { role: e.target.value });
-    if (act === "bypass") patchUser(uid, { can_bypass: e.target.checked });
-    if (act === "disabled") patchUser(uid, { disabled: e.target.checked });
+    if (act === "bypass") patchUser(uid, { can_bypass: e.target.checked }, e.target.checked ? "已开通完全放行" : "已关闭完全放行");
+    if (act === "disabled") patchUser(uid, { disabled: e.target.checked }, e.target.checked ? "已停用" : "已启用");
   });
 
   box().addEventListener("click", async e => {
-    const act = e.target.dataset.act, tr = e.target.closest("tr[data-uid]");
-    if (tab === "users" && act && tr) {
-      const uid = +tr.dataset.uid, u = users.find(x => x.id === uid);
-      if (act === "rename") {
-        const n = prompt("显示的名字", u.display_name);
-        if (n) patchUser(uid, { display_name: n });
-      } else if (act === "reset") {
-        const p = prompt(`给 ${u.display_name} 设一个新密码（至少 6 位），他会被要求重新登录：`);
-        if (p) patchUser(uid, { password: p });
-      } else if (act === "delete") {
-        if (confirm(`删除 ${u.display_name}？他的所有会话、聊天记录和工作区文件都会删除，不能恢复。\n只是不让他用的话，勾选“停用”就行。`)) {
-          try { await api("/api/admin/users/" + uid, { method: "DELETE" }); } catch (err) { alert(err.message); }
-          show("users");
-        }
+    const el = e.target.closest("[data-act]"), tr = e.target.closest("tr[data-uid]");
+    if (tab !== "users" || !el || !tr || el.tagName === "SELECT" || el.type === "checkbox") return;
+    const act = el.dataset.act, uid = +tr.dataset.uid, u = users.find(x => x.id === uid);
+    if (act === "rename") {
+      const n = prompt("显示的名字", u.display_name);
+      if (n) patchUser(uid, { display_name: n });
+    } else if (act === "reset") {
+      const p = prompt(`给 ${u.display_name} 设一个新密码（至少 6 位），他会被要求重新登录：`);
+      if (p) patchUser(uid, { password: p }, "密码已重置");
+    } else if (act === "ava") {
+      const body = dialog(`${u.display_name} 的头像`, `<div class="ava-grid">${AVATAR_LIST.map(([id, n], i) =>
+        `<button class="ava-opt ${id === u.avatar ? "on" : ""}" data-ava="${id}" style="animation-delay:${i * 25}ms">${avatarEl(id, 56)}${n}</button>`).join("")}</div>`);
+      body.onclick = ev => { const b = ev.target.closest("[data-ava]"); if (b) { closeDialog(); patchUser(uid, { avatar: b.dataset.ava }); } };
+    } else if (act === "delete") {
+      if (confirm(`删除 ${u.display_name}？他的所有会话、聊天记录和工作区文件都会删除，不能恢复。\n只是不让他用的话，打开“停用”就行。`)) {
+        try { await api("/api/admin/users/" + uid, { method: "DELETE" }); toast("已删除", "ok"); } catch (err) { toast(err.message, "err"); }
+        show("users");
       }
     }
   });
@@ -103,11 +117,12 @@
 
   async function renderChats() {
     const all = await api("/api/admin/sessions");
-    const groups = users.map(u => ({ u, list: all.filter(s => s.user_id === u.id) }));
-    box().innerHTML = '<p class="meta" style="margin-top:0">点开会话可以查看完整聊天记录和过程；别人的会话只能看，不能接着聊。</p>' +
-      groups.map(g => `<details class="grp" ${g.u.id === me.id ? "" : ""}>
-        <summary>${esc(g.u.display_name)} <span class="meta">（${esc(roleName[g.u.role] || g.u.role)} · ${g.list.length} 个会话${g.list.some(s => s.running) ? " · 有任务在进行" : ""}${g.list.some(s => s.pending) ? " · 有待确认" : ""}）</span></summary>
-        ${g.list.map(s => sessRow(s, true)).join("") || '<div class="meta" style="padding:0 12px 8px">没有会话</div>'}
+    const groups = users.map(u => ({ u, list: all.filter(s => s.user_id === u.id) })).sort((a, b) => b.list.length - a.list.length);
+    box().innerHTML = '<p class="muted" style="margin-top:0;font-size:13px">点开会话可以查看完整聊天记录和过程；别人的会话只能看，不能接着聊。</p>' +
+      groups.map((g, i) => `<details class="grp" data-uid="${g.u.id}" style="animation-delay:${i * 40}ms">
+        <summary>${avatarEl(g.u.avatar, 34)}<div><b>${esc(g.u.display_name)}</b><div class="muted" style="font-size:12.5px">${esc(roleName[g.u.role] || g.u.role)} · ${g.list.length} 个会话
+          ${g.list.some(s => s.running) ? ' · <span style="color:var(--accent)">有任务在进行</span>' : ""}${g.list.some(s => s.pending) ? ' · <span style="color:var(--amber)">有待确认</span>' : ""}</div></div>${icon("chevD", 18)}</summary>
+        <div class="list">${g.list.map(s => sessRow(s, true)).join("") || '<div class="empty-note" style="padding:4px 10px">没有会话</div>'}</div>
       </details>`).join("");
     box().querySelectorAll(".sess").forEach(row => row.onclick = () => {
       $("adminBox").classList.remove("show");
@@ -120,10 +135,8 @@
     if (tab !== "chats" || !$("adminBox").classList.contains("show")) return;
     clearTimeout(chatsTimer);
     chatsTimer = setTimeout(() => {
-      const open = [...box().querySelectorAll("details[open] summary")].map(s => s.textContent.split(" ")[0]);
-      renderChats().then(() => box().querySelectorAll("details").forEach(d => {
-        if (open.includes(d.querySelector("summary").textContent.split(" ")[0])) d.open = true;
-      }));
+      const open = [...box().querySelectorAll("details[open]")].map(d => d.dataset.uid);
+      renderChats().then(() => box().querySelectorAll("details").forEach(d => { if (open.includes(d.dataset.uid)) d.open = true; }));
     }, 800);
   };
 
@@ -134,32 +147,32 @@
     const people = users.filter(u => u.role !== "admin");
     const localNew = local.skills.filter(s => !s.in_library);
     box().innerHTML = `
-      ${local.skills.length ? `<div class="card" style="border-color:var(--warn)">
-        <h4>⚠ 台式机本机的 skill（${esc(local.dir)}）</h4>
-        <div class="meta">这里的 skill 对<b>所有人</b>都生效，不受分配控制。建议导入技能库后，把这个文件夹里的 skill 移走。</div>
-        <details style="margin-top:4px"><summary class="meta" style="cursor:pointer">共 ${local.skills.length} 个，点开查看</summary>
-        ${local.skills.map(s => `<div style="margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(s.description)}"><b>${esc(s.name)}</b> ${s.in_library ? '<span class="status approved">已在库里</span>' : ""} <span class="meta">${esc(s.description)}</span></div>`).join("")}
+      ${local.skills.length ? `<div class="card warnc">
+        <h4>${icon("alert", 16)}台式机本机还有 ${local.skills.length} 个 skill</h4>
+        <div class="muted" style="font-size:13px">位置：<code>${esc(local.dir)}</code>。这里的 skill 对<b>所有人</b>都生效，不受分配控制。建议导入技能库后，把这个文件夹里的移走。</div>
+        <details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:13px">展开查看</summary>
+        ${local.skills.map(s => `<div style="margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px" title="${esc(s.description)}"><b>${esc(s.name)}</b> ${s.in_library ? '<span class="status approved">已在库里</span>' : ""} <span class="muted">${esc(s.description)}</span></div>`).join("")}
         </details>
-        ${localNew.length ? `<button class="btn small" id="importLocal" style="margin-top:6px">把 ${localNew.length} 个导入技能库</button>` : ""}
+        ${localNew.length ? `<button class="btn small" id="importLocal" style="margin-top:10px">${icon("download", 14)}把 ${localNew.length} 个导入技能库</button>` : ""}
       </div>` : ""}
-      ${lib.length ? "" : '<p class="meta">技能库是空的。同事提交的 skill 审核通过后会出现在这里。</p>'}
-      ${lib.map(s => `<div class="card" data-skill="${esc(s.name)}">
-        <h4>${esc(s.name)}</h4>
-        <div class="meta">${esc(s.description)}</div>
-        <div class="meta">提交人：${esc(s.submitter || "—")} · 更新：${ftime(s.updated)}</div>
+      ${lib.length ? "" : `<div style="text-align:center;padding:30px 0">${orb(56)}<p class="muted">技能库是空的。同事提交的 skill 审核通过后会出现在这里。</p></div>`}
+      ${lib.map((s, i) => `<div class="card" data-skill="${esc(s.name)}" style="animation-delay:${i * 40}ms">
+        <h4>${icon("puzzle", 16)}${esc(s.name)}</h4>
+        <div class="muted" style="font-size:13px">${esc(s.description)}</div>
+        <div class="muted" style="font-size:12px;margin-top:2px">提交人：${esc(s.submitter || "—")} · 更新：${ftime(s.updated)}</div>
         <div class="users-pick">
-          <label><input type="checkbox" data-everyone ${s.everyone ? "checked" : ""}> <b>所有人可用</b></label>
-          ${people.map(u => `<label><input type="checkbox" data-u="${u.id}" ${s.users.includes(u.id) ? "checked" : ""} ${s.everyone ? "disabled" : ""}> ${esc(u.display_name)}</label>`).join("")}
-          <span class="meta">（管理员默认都能用）</span>
+          <label class="upick all"><input type="checkbox" data-everyone ${s.everyone ? "checked" : ""}>所有人可用</label>
+          ${people.map(u => `<label class="upick"><input type="checkbox" data-u="${u.id}" ${s.users.includes(u.id) ? "checked" : ""} ${s.everyone ? "disabled" : ""}>${avatarEl(u.avatar, 22)}${esc(u.display_name)}</label>`).join("")}
         </div>
-        <div style="margin-top:6px;display:flex;gap:6px">
-          <button class="btn small" data-view>查看文件</button>
-          <button class="btn small danger" data-remove>从库里删除</button>
+        <div style="margin-top:10px;display:flex;gap:6px;align-items:center">
+          <button class="btn small" data-view>${icon("eye", 14)}查看文件</button>
+          <button class="btn small ghost danger" data-remove>${icon("trash", 14)}从库里删除</button>
+          <span class="muted" style="font-size:12px;margin-left:auto">管理员默认都能用</span>
         </div>
       </div>`).join("")}`;
     $("importLocal") && ($("importLocal").onclick = async () => {
       const r = await post("/api/admin/local-skills/import", { names: localNew.map(s => s.name) });
-      flash(`已导入 ${r.imported.length} 个，记得分配给需要的人`);
+      toast(`已导入 ${r.imported.length} 个，记得分配给需要的人`, "ok");
       show("library");
     });
     box().querySelectorAll(".card[data-skill]").forEach(card => {
@@ -168,8 +181,8 @@
         const everyone = card.querySelector("[data-everyone]").checked;
         card.querySelectorAll("[data-u]").forEach(c => c.disabled = everyone);
         const ids = [...card.querySelectorAll("[data-u]:checked")].map(c => +c.dataset.u);
-        try { await post(`/api/admin/library/${name}/access`, { everyone, users: ids }, "PUT"); flash("已保存分配", 1500); }
-        catch (e) { alert(e.message); }
+        try { await post(`/api/admin/library/${name}/access`, { everyone, users: ids }, "PUT"); toast("已保存分配", "ok", 1500); }
+        catch (e) { toast(e.message, "err"); }
       };
       card.querySelectorAll("input[type=checkbox]").forEach(c => c.onchange = save);
       card.querySelector("[data-view]").onclick = async () => {
@@ -179,6 +192,7 @@
       card.querySelector("[data-remove]").onclick = async () => {
         if (!confirm(`从技能库删除 ${name}？所有人都不能再用它。`)) return;
         await api(`/api/admin/library/${name}`, { method: "DELETE" });
+        toast("已删除", "ok");
         show("library");
       };
     });
@@ -187,7 +201,7 @@
   // 审核和查看用：左边文件列表，右边内容
   function fileViewer(title, files, buttons = [], extraHtml = "") {
     const body = dialog(title, `${extraHtml}<div class="filev"><div class="list">${files.map((f, i) =>
-      `<div data-i="${i}">${/\.(py|sh|bat|cmd|ps1|js|ts|exe|dll)$/i.test(f.path) ? "⚙ " : ""}${esc(f.path)} <span class="meta">${fsize(f.size)}</span></div>`).join("")}</div>
+      `<div data-i="${i}">${/\.(py|sh|bat|cmd|ps1|js|ts|exe|dll)$/i.test(f.path) ? '<span class="status pending">脚本</span> ' : ""}${esc(f.path)} <span class="muted" style="font-size:11.5px">${fsize(f.size)}</span></div>`).join("")}</div>
       <pre id="fvPre">选左边的文件查看内容</pre></div>`, buttons, true);
     const pick = i => {
       const f = files[i];
@@ -206,15 +220,15 @@
     const subs = await refreshPending();
     const st = { pending: "待审核", approved: "已入库", rejected: "未通过" };
     const pending = subs.filter(s => s.status === "pending"), done = subs.filter(s => s.status !== "pending");
-    const card = s => `<div class="card"><h4>${esc(s.name)} <span class="status ${s.status}">${st[s.status]}</span></h4>
-      <div class="meta">${esc(s.description)}</div>
-      <div class="meta">提交人：${esc(s.submitter || "—")} · ${ftime(s.created)}${s.note ? " · 备注：" + esc(s.note) : ""}</div>
-      <div style="margin-top:6px;display:flex;gap:6px">
-        <button class="btn small ${s.status === "pending" ? "primary" : ""}" data-review="${s.id}">${s.status === "pending" ? "审核" : "查看"}</button>
-        <button class="btn small danger" data-delsub="${s.id}">删除</button></div></div>`;
-    box().innerHTML = `<p class="meta" style="margin-top:0">skill 里的脚本会在台式机上以完整权限运行，审核时请把脚本文件（⚙ 标记的）都看一遍。</p>
-      <h4>待审核（${pending.length}）</h4>${pending.map(card).join("") || '<p class="meta">没有待审核的提交。</p>'}
-      <h4>历史</h4>${done.map(card).join("") || '<p class="meta">没有。</p>'}`;
+    const card = (s, i) => `<div class="card" style="animation-delay:${i * 40}ms"><h4>${avatarEl(userOf(s.submitted_by).avatar, 26)}${esc(s.name)} <span class="status ${s.status}">${st[s.status]}</span></h4>
+      <div class="muted" style="font-size:13px">${esc(s.description)}</div>
+      <div class="muted" style="font-size:12px;margin-top:2px">提交人：${esc(s.submitter || "—")} · ${ftime(s.created)}${s.note ? " · 备注：" + esc(s.note) : ""}</div>
+      <div style="margin-top:10px;display:flex;gap:6px">
+        <button class="btn small ${s.status === "pending" ? "primary" : ""}" data-review="${s.id}">${icon(s.status === "pending" ? "shield" : "eye", 14)}${s.status === "pending" ? "审核" : "查看"}</button>
+        <button class="btn small ghost danger" data-delsub="${s.id}">${icon("trash", 14)}</button></div></div>`;
+    box().innerHTML = `<div class="card warnc" style="padding:10px 14px"><div style="font-size:13px">${icon("alert", 14)} skill 里的脚本会在台式机上以完整权限运行，审核时请把标了“脚本”的文件都看一遍。</div></div>
+      <div style="font-weight:600;margin:16px 0 8px">待审核（${pending.length}）</div>${pending.map(card).join("") || '<p class="empty-note">没有待审核的提交。</p>'}
+      <div style="font-weight:600;margin:16px 0 8px">历史</div>${done.map(card).join("") || '<p class="empty-note">没有。</p>'}`;
     box().querySelectorAll("[data-review]").forEach(b => b.onclick = () => review(b.dataset.review));
     box().querySelectorAll("[data-delsub]").forEach(b => b.onclick = async () => {
       if (!confirm("删除这个提交记录？（已入库的技能不受影响）")) return;
@@ -230,17 +244,17 @@
     const decide = approve => async () => {
       const note = $("rvNote").value.trim();
       await post(`/api/skills/submissions/${id}/review`, { approve, note });
-      flash(approve ? `已入库：${s.name}。到“技能库”里分配给需要的人` : "已退回");
+      toast(approve ? `已入库：${s.name}。到“技能库”里分配给需要的人` : "已退回", approve ? "ok" : "info");
       show(approve ? "library" : "review");
     };
     fileViewer(`审核技能：${s.name}`, d.files,
-      pending ? [{ label: "退回", danger: true, onClick: decide(false) }, { label: "通过并入库", primary: true, onClick: decide(true) }] : [],
-      `<div class="meta">提交人：${esc(s.submitter || userName(s.submitted_by))} · ${d.files.length} 个文件
-        ${d.updates_existing ? ' · <b style="color:var(--warn)">会覆盖技能库里同名的技能</b>' : ""}</div>
-       <div class="meta" style="margin-bottom:8px">${esc(s.description)}</div>
-       ${pending ? '<input id="rvNote" placeholder="给提交人的备注（可选）" style="width:100%;margin-bottom:8px;padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg)">' : ""}`);
+      pending ? [{ label: "退回", icon: "x", danger: true, onClick: decide(false) }, { label: "通过并入库", icon: "check", primary: true, onClick: decide(true) }] : [],
+      `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">${avatarEl(userOf(s.submitted_by).avatar, 36)}<div>
+        <div><b>${esc(s.submitter || userOf(s.submitted_by).display_name)}</b> 提交 · ${d.files.length} 个文件${d.updates_existing ? ' · <span class="status pending">会覆盖库里同名的技能</span>' : ""}</div>
+        <div class="muted" style="font-size:13px">${esc(s.description)}</div></div></div>
+       ${pending ? '<input class="field" id="rvNote" placeholder="给提交人的备注（可选）" style="margin-bottom:10px">' : ""}`);
   }
 
   $("adminTabs").onclick = e => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); };
-  $("adminLink").onclick = () => { $("adminBox").classList.add("show"); $("side").classList.remove("open"); show(tab); };
+  window.openAdmin = () => { $("adminBox").classList.add("show"); $("side").classList.remove("open"); show(tab); };
 })();

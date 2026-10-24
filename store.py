@@ -108,9 +108,10 @@ _db.executescript(
         created REAL, reviewed_by INTEGER, reviewed_at REAL, note TEXT);
     """
 )
-for _col in ("bypass INTEGER DEFAULT 0", "created_by TEXT DEFAULT ''", "user_id INTEGER", "work_dir TEXT"):
+for _table, _col in (("sessions", "bypass INTEGER DEFAULT 0"), ("sessions", "created_by TEXT DEFAULT ''"),
+                     ("sessions", "user_id INTEGER"), ("sessions", "work_dir TEXT"), ("users", "avatar TEXT")):
     try:
-        _db.execute(f"ALTER TABLE sessions ADD COLUMN {_col}")
+        _db.execute(f"ALTER TABLE {_table} ADD COLUMN {_col}")
     except sqlite3.OperationalError:
         pass  # 列已存在
 
@@ -124,6 +125,18 @@ def db(sql: str, args=(), one=False):
 
 
 # ---------- 账号 ----------
+
+# 预设头像（图案在 static/ui.js 里），只能从这些里选，不能上传
+AVATARS = ["orange", "lemon", "lime", "grapefruit", "peach", "cherry", "grape", "blueberry",
+           "kiwi", "avocado", "watermelon", "pineapple", "strawberry", "coconut", "pear", "plum"]
+
+
+def avatar_of(u: dict) -> str:
+    if u.get("avatar") in AVATARS:
+        return u["avatar"]
+    if u.get("role") == "device":
+        return "orange"  # 板子就是小橙子
+    return AVATARS[(u.get("id") or 0) % len(AVATARS)]
 
 def hash_password(pw: str) -> str:
     salt = secrets.token_bytes(16)
@@ -141,7 +154,9 @@ def check_password(pw: str, stored: str) -> bool:
 
 
 def user_public(u: dict) -> dict:
-    return {k: u[k] for k in ("id", "username", "display_name", "role", "can_bypass", "disabled", "created")}
+    out = {k: u[k] for k in ("id", "username", "display_name", "role", "can_bypass", "disabled", "created")}
+    out["avatar"] = avatar_of(u)
+    return out
 
 
 def get_user(uid) -> dict | None:

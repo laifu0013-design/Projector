@@ -1,4 +1,4 @@
-// Claude 工作台网页端：登录、会话、引用文件、技能、本机文件、文件预览。管理后台在 admin.js。
+// Claude 工作台网页端：登录、会话、引用文件、技能、本机文件、文件预览、命令面板。管理后台在 admin.js，小零件在 ui.js。
 "use strict";
 const $ = id => document.getElementById(id);
 const store = {
@@ -7,6 +7,7 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 const IS_DESKTOP = !!(window.__TAURI__ && window.__TAURI__.core);
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 
 let token = store.get("token");
@@ -21,12 +22,14 @@ let links = [];              // 当前会话上传的本机文件夹
 let es = null;
 const composer = { refs: [], skill: "", workDir: "" };  // workDir：新会话还没创建时先记着
 let mySkills = [];
+const seen = new Set();      // 已经显示过的消息，只给新消息播入场动画
+let liveSteps = 0;           // 实时步骤里已经显示过几步
 
 // ---------- 通用 ----------
 
 function api(path, opts = {}) {
   const headers = { Authorization: "Bearer " + token, ...(opts.headers || {}) };
-  if (!(opts.body instanceof Blob || opts.body instanceof ArrayBuffer || opts.raw)) headers["Content-Type"] = "application/json";
+  if (!opts.raw) headers["Content-Type"] = "application/json";
   return fetch(path, { ...opts, headers }).then(async r => {
     if (r.status === 401 && !path.startsWith("/api/login")) { showLogin(); throw new Error("请先登录"); }
     const data = await r.json().catch(() => ({}));
@@ -50,16 +53,19 @@ function fsize(n) {
 const pad = n => String(n).padStart(2, "0");
 const fdate = t => { const d = new Date(t * 1000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 const ftime = t => { const d = new Date(t * 1000); return `${fdate(t)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const baseName = p => p.split(/[\\/]/).filter(Boolean).pop() || p;
-
-function flash(text, ms = 4000) {
-  const d = document.createElement("div");
-  d.textContent = text;
-  d.style.cssText = "position:fixed;left:50%;bottom:32px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:8px 16px;border-radius:8px;font-size:14px;z-index:40;max-width:90vw";
-  document.body.appendChild(d); setTimeout(() => d.remove(), ms);
+const hm = t => { const d = new Date(t * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function rel(t) {
+  const d = new Date(t * 1000), now = new Date();
+  const day = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (day === 0) return hm(t);
+  if (day === 1) return "昨天";
+  if (day < 7) return day + " 天前";
+  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
+const baseName = p => p.split(/[\\/]/).filter(Boolean).pop() || p;
+const flash = (text, ms) => toast(text, "info", ms);
 
-// 通用小对话框：dialog(标题, 内容 html, [{label, primary, danger, onClick}])；onClick 返回 false 则不关闭
+// 通用对话框：dialog(标题, 内容 html, [{label, primary, danger, onClick}])；onClick 返回 false 则不关闭
 function dialog(title, html, buttons = [], wide = false) {
   $("dlgTitle").textContent = title;
   $("dlgBody").innerHTML = html;
@@ -69,29 +75,60 @@ function dialog(title, html, buttons = [], wide = false) {
   for (const b of buttons) {
     const el = document.createElement("button");
     el.className = "btn" + (b.primary ? " primary" : "") + (b.danger ? " danger" : "");
-    el.textContent = b.label;
+    el.innerHTML = (b.icon ? icon(b.icon, 15) : "") + esc(b.label);
     el.onclick = async () => {
       el.disabled = true;
       try { if ((await b.onClick?.()) !== false) closeDialog(); }
-      catch (e) { const err = $("dlgBody").querySelector(".err"); if (err) err.textContent = e.message; else alert(e.message); }
+      catch (e) { const err = $("dlgBody").querySelector(".err"); if (err) err.textContent = e.message; else toast(e.message, "err"); }
       finally { el.disabled = false; }
     };
     $("dlgFoot").appendChild(el);
   }
   $("dlgBox").classList.add("show");
-  setTimeout(() => $("dlgBody").querySelector("input, textarea")?.focus(), 50);
+  setTimeout(() => $("dlgBody").querySelector("input:not([type=checkbox]), textarea")?.focus(), 60);
   return $("dlgBody");
 }
 function closeDialog() { $("dlgBox").classList.remove("show"); }
 
+// ---------- 静态图标 ----------
+
+function paintStatic() {
+  $("brand").innerHTML = `${orb(30)}<div><div class="b1">Projector</div><div class="b2">CLAUDE 工作台</div></div>`;
+  $("newBtn").innerHTML = icon("plus", 18) + "新会话";
+  $("sqIcon").innerHTML = icon("search", 15);
+  $("kbdK").textContent = IS_MAC ? "⌘K" : "Ctrl K";
+  $("menuBtn").innerHTML = icon("menu", 20);
+  $("filesBtn").innerHTML = icon("folder");
+  $("stepsBtn").innerHTML = icon("steps");
+  $("paletteBtn").innerHTML = icon("command");
+  $("meChev").innerHTML = icon("chevD", 16, "muted");
+  $("refBtn").innerHTML = icon("clip", 16) + "<span>引用文件</span>";
+  $("localBtn").innerHTML = icon("laptop", 16) + "<span>本机文件</span>";
+  $("skillBtn").innerHTML = icon("puzzle", 16) + "<span>技能</span>";
+  $("sendBtn").innerHTML = icon("send", 18);
+  $("stopBtn").innerHTML = icon("stop", 14);
+  $("dzOrb").innerHTML = orb(64, "busy");
+  $("frefDir").innerHTML = icon("clip", 14) + "引用此文件夹";
+  $("fback").innerHTML = icon("chevL");
+  $("fref").innerHTML = icon("clip", 14) + "引用到对话";
+  $("flocal").innerHTML = icon("external", 14) + "用本机程序打开";
+  $("fdown").innerHTML = icon("download", 14) + "下载";
+  $("palIcon").innerHTML = icon("search", 18);
+  document.querySelectorAll(".closebtn").forEach(b => b.innerHTML = icon("x"));
+  // 登录页：橙光球外面两圈慢慢转动的水果头像
+  const ring = (ids, r, cls, size) => `<div class="ring ${cls}">${ids.map((id, i) => {
+    const a = i / ids.length * Math.PI * 2;
+    return `<span style="transform:translate(${Math.cos(a) * r - size / 2}px, ${Math.sin(a) * r - size / 2}px)">${avatarEl(id, size)}</span>`;
+  }).join("")}</div>`;
+  $("orbit").innerHTML = ring(["orange", "grape", "kiwi", "peach", "blueberry", "pineapple", "lemon", "strawberry"], 190, "", 46)
+    + ring(["avocado", "cherry", "watermelon", "plum", "lime"], 120, "r2", 34) + orb(120);
+}
+paintStatic();
+
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => b.closest(".overlay").classList.remove("show"));
-document.addEventListener("keydown", e => {
-  if (e.key !== "Escape") return;
-  for (const id of ["dlgBox", "filesBox", "stepsBox", "adminBox"]) {
-    if ($(id).classList.contains("show")) { $(id).classList.remove("show"); return; }
-  }
-  $("skillPop").hidden = true;
-});
+document.querySelectorAll(".overlay").forEach(o => o.addEventListener("mousedown", e => {
+  if (e.target === o && o.id !== "login") o.classList.remove("show");
+}));
 
 // ---------- 登录 ----------
 
@@ -103,18 +140,17 @@ async function showLogin() {
   try {
     const s = await fetch("/api/setup").then(r => r.json());
     setupMode = s.needed;
-    if (s.needed && !s.local) {
-      $("lgErr").textContent = "还没有管理员。请在台式机本机打开 http://localhost:" + location.port + " 创建管理员";
-    }
+    if (s.needed && !s.local) $("lgErr").textContent = "还没有管理员。请在台式机本机打开 http://localhost:" + location.port + " 创建";
   } catch { setupMode = false; }
-  $("loginTitle").textContent = setupMode ? "创建管理员" : "登录 Claude 工作台";
+  $("loginTitle").textContent = setupMode ? "创建管理员" : "欢迎回来";
+  $("loginLead").textContent = setupMode ? "这个账号可以管理用户、聊天记录和技能库" : "用管理员给你的账号登录";
   $("setupHint").hidden = !setupMode;
-  $("lgName").hidden = $("lgPwd2").hidden = !setupMode;
+  for (const id of ["lgName", "lgNameL", "lgPwd2", "lgPwd2L"]) $(id).hidden = !setupMode;
   $("lgBtn").textContent = setupMode ? "创建并进入" : "登录";
   $("lgNote").hidden = setupMode;
   $("lgPwd").autocomplete = setupMode ? "new-password" : "current-password";
   $("lgUser").value = store.get("username");
-  ($("lgUser").value ? $("lgPwd") : $("lgUser")).focus();
+  setTimeout(() => ($("lgUser").value ? $("lgPwd") : $("lgUser")).focus(), 100);
 }
 
 $("loginForm").onsubmit = async e => {
@@ -134,47 +170,285 @@ $("loginForm").onsubmit = async e => {
     $("lgPwd").value = $("lgPwd2").value = "";
     $("login").classList.remove("show");
     enter(data.user);
-  } catch (err) { $("lgErr").textContent = err.message; }
-  finally { $("lgBtn").disabled = false; }
+    toast(`欢迎，${data.user.display_name}`, "ok");
+  } catch (err) {
+    $("lgErr").textContent = err.message;
+    $("loginForm").animate([{ transform: "translateX(0)" }, { transform: "translateX(-8px)" }, { transform: "translateX(8px)" }, { transform: "translateX(0)" }], { duration: 300 });
+  } finally { $("lgBtn").disabled = false; }
 };
+
+function paintMe() {
+  $("me").textContent = me.display_name;
+  $("meAva").innerHTML = avatarEl(me.avatar, 36);
+  $("roleTag").innerHTML = me.role === "admin" ? '<span class="tag admin">管理员</span>' : esc("@" + me.username);
+}
 
 function enter(user) {
   me = user;
-  $("me").textContent = me.display_name;
-  $("roleTag").innerHTML = me.role === "admin" ? '<span class="warn">管理员</span>' : "";
-  $("adminLink").hidden = me.role !== "admin";
+  paintMe();
   sessions = []; current = null; currentSess = null; messages = []; live = null; approvals = []; links = [];
+  seen.clear();
   resetComposer();
   connect();
-  loadSkills();
+  loadSkills().then(() => { if (!messages.length && !live) renderMessages(true); });
+  renderSessions();
   renderMessages();
 }
 
-$("logoutLink").onclick = async () => {
+// ---------- 用户菜单：头像、技能、管理、主题、密码、退出 ----------
+
+const THEMES = { auto: ["跟随系统", "sparkle"], light: ["浅色", "sun"], dark: ["深色", "moon"] };
+function renderUserMenu() {
+  const th = THEMES[store.get("theme") || "auto"];
+  $("userMenu").innerHTML = `
+    <button data-act="avatar">${icon("user", 16)}更换头像</button>
+    <button data-act="skills">${icon("puzzle", 16)}我的技能</button>
+    ${me.role === "admin" ? `<button data-act="admin">${icon("shield", 16)}管理后台</button>` : ""}
+    <hr>
+    <button data-act="theme">${icon(th[1], 16)}主题：${th[0]}</button>
+    <button data-act="pwd">${icon("key", 16)}修改密码</button>
+    <button data-act="logout">${icon("logout", 16)}退出登录</button>`;
+}
+$("userCard").onclick = e => {
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (!act) {
+    if (e.target.closest("#userMenu")) return;
+    renderUserMenu(); $("userMenu").hidden = !$("userMenu").hidden; return;
+  }
+  $("userMenu").hidden = true;
+  if (act === "avatar") pickAvatar();
+  if (act === "skills") loadSkills().then(openMySkills);
+  if (act === "admin") window.openAdmin && window.openAdmin();
+  if (act === "theme") {
+    const order = ["auto", "light", "dark"], cur = store.get("theme") || "auto";
+    const next = order[(order.indexOf(cur) + 1) % 3];
+    store.set("theme", next); applyTheme(next);
+    toast("主题：" + THEMES[next][0]);
+  }
+  if (act === "pwd") changePassword();
+  if (act === "logout") logout();
+};
+document.addEventListener("click", e => {
+  if (!e.target.closest("#userCard")) $("userMenu").hidden = true;
+  if (!e.target.closest(".anchor")) $("skillPop").hidden = true;
+});
+
+function pickAvatar() {
+  const body = dialog("选一个头像", `<div class="ava-grid">${AVATAR_LIST.map(([id, n], i) =>
+    `<button class="ava-opt ${id === me.avatar ? "on" : ""}" data-ava="${id}" style="animation-delay:${i * 25}ms">${avatarEl(id, 56)}${n}</button>`).join("")}</div>`);
+  body.onclick = async e => {
+    const b = e.target.closest("[data-ava]");
+    if (!b) return;
+    body.querySelectorAll(".ava-opt").forEach(x => x.classList.toggle("on", x === b));
+    try {
+      me = { ...me, ...(await post("/api/me", { avatar: b.dataset.ava }, "PATCH")) };
+      paintMe(); renderMessages(true);
+      setTimeout(closeDialog, 250);
+      toast("头像换成了" + AVATAR_NAMES[b.dataset.ava], "ok");
+    } catch (err) { toast(err.message, "err"); }
+  };
+}
+
+function changePassword() {
+  dialog("修改密码", `<div class="form">
+    <input class="field" type="password" id="pwOld" placeholder="原密码" autocomplete="current-password">
+    <input class="field" type="password" id="pwNew" placeholder="新密码（至少 6 位）" autocomplete="new-password">
+    <input class="field" type="password" id="pwNew2" placeholder="再输一次新密码" autocomplete="new-password">
+    <div class="err"></div></div>`, [{
+    label: "保存", primary: true, onClick: async () => {
+      if ($("pwNew").value !== $("pwNew2").value) throw new Error("两次新密码不一样");
+      await post("/api/me/password", { old: $("pwOld").value, new: $("pwNew").value });
+      toast("密码已修改", "ok");
+    },
+  }]);
+}
+
+async function logout() {
   if (!confirm("退出登录？")) return;
   try { await post("/api/logout"); } catch {}
   token = ""; store.del("token"); me = null;
   showLogin();
+}
+
+// ---------- 会话列表 ----------
+
+function sessRow(s, adminView = false) {
+  const lead = s.running ? orb(14, "busy") : s.pending ? '<span class="pend"></span>' : (s.source === "voice" ? icon("mic", 14) : icon("chat", 14));
+  return `<div class="sess ${s.id === current ? "active" : ""}" data-id="${s.id}" title="${esc(s.title)}">
+      <span class="lead">${lead}</span>
+      <span class="t">${esc(s.title)}</span>
+      ${s.pending ? '<span class="tag warn">待确认</span>' : ""}
+      <span class="tm">${adminView ? ftime(s.updated) : rel(s.updated)}</span>
+      ${adminView ? "" : `<button class="x" data-del="${s.id}" title="删除">${icon("trash", 14)}</button>`}
+    </div>`;
+}
+
+function renderSessions() {
+  const q = $("sessQ").value.trim().toLowerCase();
+  const list = sessions.filter(s => !q || s.title.toLowerCase().includes(q));
+  if (!list.length) {
+    $("sessions").innerHTML = `<div class="empty-note" style="padding:20px 10px;text-align:center">${q ? "没有匹配的会话" : "还没有会话<br>在右边输入就能开始"}</div>`;
+    return;
+  }
+  const today = new Date(new Date().toDateString()) / 1000;
+  const groups = [["今天", s => s.updated >= today], ["昨天", s => s.updated >= today - 86400], ["7 天内", s => s.updated >= today - 6 * 86400], ["更早", () => true]];
+  const used = new Set();
+  let html = "", idx = 0;
+  for (const [name, test] of groups) {
+    const items = list.filter(s => !used.has(s.id) && test(s));
+    if (!items.length) continue;
+    items.forEach(s => used.add(s.id));
+    html += `<div class="sgroup">${name}</div>` + items.map(s => sessRow(s).replace('class="sess', `style="animation-delay:${Math.min(idx++, 12) * 18}ms" class="sess`)).join("");
+  }
+  $("sessions").innerHTML = html;
+}
+$("sessQ").addEventListener("input", renderSessions);
+
+// ---------- 顶栏和消息 ----------
+
+const isMine = () => !currentSess || currentSess.user_id === me.id;
+
+function renderTop() {
+  const s = currentSess;
+  const mine = isMine();
+  $("title").textContent = s ? s.title : "新会话";
+  const running = !!(s && s.running);
+  $("stopBtn").hidden = !running;
+  $("sendBtn").hidden = running;
+  $("cbox").classList.toggle("running", running);
+  $("bypassWrap").hidden = !me.can_bypass || (s && s.source === "voice") || !mine;
+  $("bypass").checked = !!(s && s.bypass);
+  $("bypass").disabled = !s;
+  $("bypassWrap").classList.toggle("on", !!(s && s.bypass));
+  $("stepsBtn").disabled = !s;
+  const wd = s ? s.work_dir : (composer.workDir || "");
+  $("wdBtn").innerHTML = icon("folder", 13) + `<span>${esc(wd ? baseName(wd) : "默认工作目录")}</span>`;
+  $("wdBtn").title = (wd || "默认工作目录") + "\n工作文件夹：Claude 在这个文件夹里干活。只能在会话开始前选";
+  $("wdBtn").disabled = !mine || !!(s && s.claude_session);
+  $("ownerTag").innerHTML = s && !mine ? `${avatarEl(s.owner_avatar, 18)} ${esc(s.owner)}` : (s && s.bypass ? '<span class="tag warn">完全放行中</span>' : "");
+  $("ownerTag").style.cssText = "display:inline-flex;align-items:center;gap:6px";
+  $("composer").hidden = !mine;
+  $("otherBanner").hidden = mine;
+  if (!mine) $("otherBanner").innerHTML = `${icon("eye", 16)}你在查看 <b>${esc(s.owner)}</b> 的会话${s.source === "voice" ? "（板子语音）" : ""}，只能看。待确认的操作可以代为处理。`;
+  $("cfoot").textContent = s && s.bypass ? "完全放行已打开：所有操作都会直接执行，不再询问" : "Claude 在台式机上干活，重要的改动请再核对一遍";
+  renderLinks();
+}
+
+const TOOL_META = {
+  Read: ["读取", "book"], Glob: ["查找文件", "search"], Grep: ["搜索内容", "search"], Edit: ["修改", "edit"], MultiEdit: ["修改", "edit"],
+  Write: ["写入", "file"], Bash: ["运行命令", "terminal"], WebFetch: ["打开网页", "globe"], Skill: ["使用技能", "puzzle"],
+  Task: ["子任务", "bolt"], TodoWrite: ["列计划", "steps"], NotebookEdit: ["修改笔记本", "edit"],
 };
-
-$("pwdLink").onclick = () => dialog("修改密码", `<div class="form">
-    <input type="password" id="pwOld" placeholder="原密码" autocomplete="current-password">
-    <input type="password" id="pwNew" placeholder="新密码（至少 6 位）" autocomplete="new-password">
-    <input type="password" id="pwNew2" placeholder="再输一次新密码" autocomplete="new-password">
-    <div class="err"></div></div>`, [{
-  label: "保存", primary: true, onClick: async () => {
-    if ($("pwNew").value !== $("pwNew2").value) throw new Error("两次新密码不一样");
-    await post("/api/me/password", { old: $("pwOld").value, new: $("pwNew").value });
-    flash("密码已修改");
-  },
-}]);
-
-// ---------- 会话列表和消息 ----------
-
-function toolChips(tools) {
+// 把文件库、工作区下的完整路径缩短成“文件库/…”“工作区/…”
+function shortPath(p) {
+  if (!p) return p;
+  const names = ["文件库", "工作区"];
+  for (const i of [1, 0]) {  // 工作区可能在文件库里面，先认工作区
+    if (!F.roots[i]) continue;
+    const root = F.roots[i].replace(/[\\/]$/, "");
+    if (p.toLowerCase().startsWith(root.toLowerCase())) {
+      let rest = p.slice(root.length).replace(/^[\\/]/, "").replaceAll("\\", "/");
+      if (i === 1) rest = rest.split("/").slice(2).join("/");  // 去掉用户和会话两层
+      return names[i] + "/" + rest;
+    }
+  }
+  return p;
+}
+function stepLi(t, cls = "") {
+  const [label, ic] = TOOL_META[t.name] || [t.name.replace(/^mcp__\w+__/, ""), "bolt"];
+  const d = shortPath(t.detail);
+  return `<li class="${cls}"><span class="dot">${icon(ic, 12)}</span><span class="lb">${esc(label)}</span>${d ? `<span class="dt" title="${esc(t.detail)}">${esc(d)}</span>` : ""}</li>`;
+}
+function stepsDone(tools) {
   if (!tools || !tools.length) return "";
-  return '<div class="tools">' + tools.map(t =>
-    `<span class="chip" title="${esc(t.detail)}">${esc(t.name)}${t.detail ? " · " + esc(t.detail) : ""}</span>`).join("") + "</div>";
+  return `<details class="steps"><summary>${icon("steps", 14)}做了 ${tools.length} 步${icon("chevD", 14)}</summary><ol class="tl">${tools.map(t => stepLi(t)).join("")}</ol></details>`;
+}
+function stepsLive(tools, waiting) {
+  if (!tools.length) return "";
+  const html = tools.map((t, i) => stepLi(t, (i >= liveSteps ? "new " : "") + (i === tools.length - 1 && !waiting ? "cur" : ""))).join("");
+  liveSteps = tools.length;
+  return `<ol class="tl">${html}</ol>`;
+}
+
+function chipsHtml(meta) {
+  const refs = (meta && meta.refs) || [];
+  const skill = meta && meta.skill;
+  if (!refs.length && !skill) return "";
+  return '<div class="chips">' + (skill ? `<span class="chip skill">${icon("puzzle", 12)}<span>${esc(skill)}</span></span>` : "") +
+    refs.map(r => `<span class="chip ref" data-fpath="${esc(r)}" title="${esc(r)}">${icon("clip", 12)}<span>${esc(baseName(r))}</span></span>`).join("") + "</div>";
+}
+
+function aiHead(t, state = "idle") {
+  return `<div class="ai-head">${orb(26, state)}<span class="who">Claude</span>${t ? `<span class="tm">${hm(t)}</span>` : ""}</div>`;
+}
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 5 ? "夜深了" : h < 11 ? "早上好" : h < 13 ? "中午好" : h < 18 ? "下午好" : "晚上好";
+}
+
+function welcomeHtml() {
+  const cards = [
+    ["search", "找文件", "比如：帮我在 D 盘里找上个月的合同", "fill:帮我在 D 盘里找一下上个月的合同，列出路径和修改时间"],
+    ["clip", "读懂一份文档", "引用文件库里的文件，让 Claude 提炼要点", "ref"],
+    ["laptop", "处理本机文件", "把这台电脑上的表格交给 Claude 汇总，结果同步回来", "local"],
+    ["puzzle", "使用技能", mySkills.length ? `你有 ${mySkills.length} 个可用技能，选一个开始` : "看看你能用哪些技能，或者提交一个新的", "skill"],
+  ];
+  return `<div class="welcome">
+    <div class="w-orb">${orb(76)}</div>
+    <h1 class="w-hi"><em>${greeting()}</em><span class="cn">，${esc(me.display_name)}</span></h1>
+    <p class="w-sub">Claude 已经在台式机上准备好了。删除、移动文件和运行命令前，都会先在这里请你确认。</p>
+    <div class="w-cards">${cards.map(([ic, t, d, act]) => `<div class="w-card" data-act="${esc(act)}"><span class="wi">${icon(ic, 19)}</span><div><b>${t}</b><small>${esc(d)}</small></div></div>`).join("")}</div>
+  </div>`;
+}
+
+function renderMessages(force = false) {
+  if (!me) return;
+  renderTop();
+  if (!messages.length && !live && !approvals.length) {
+    if (force || !$("list").querySelector(".welcome")) $("list").innerHTML = welcomeHtml();
+    return;
+  }
+  const ownerAva = currentSess ? currentSess.owner_avatar : me.avatar;
+  let html = messages.map(m => {
+    const meta = m.meta || {};
+    const isNew = !seen.has(m.id) ? " new" : "";
+    if (m.role === "user") {
+      const tag = meta.bypass ? " · 完全放行" : "";
+      return `<div class="msg me${isNew}"><div class="me-col">${chipsHtml(meta)}<div class="bubble">${esc(m.content)}</div><div class="meta">${esc(meta.author || "")} · ${hm(m.created)}${tag}</div></div>${avatarEl(ownerAva, 32)}</div>`;
+    }
+    if (m.role === "event") {
+      const kind = m.content.startsWith("✔") ? "ok" : (m.content.startsWith("✘") || m.content.startsWith("⌛")) ? "no" : "";
+      return `<div class="msg evt ${kind}${isNew}"><span>${icon(kind === "ok" ? "check" : kind === "no" ? "x" : "sparkle", 13)}${esc(m.content.replace(/^[✔✘⌛]\s*/, ""))}</span></div>`;
+    }
+    const info = [meta.seconds != null ? meta.seconds + " 秒" : "", meta.cost ? "$" + meta.cost.toFixed(4) : ""].filter(Boolean).join(" · ");
+    const body = m.role === "error" ? `<div class="errbox">${icon("alert", 17)}<div>${esc(m.content)}</div></div>` : `<div class="md">${md(m.content)}</div>`;
+    return `<div class="msg ai${isNew}">${aiHead(m.created)}<div class="ai-body">${stepsDone(meta.tools)}${body}${info ? `<div class="meta" style="margin-top:8px">${info}</div>` : ""}</div></div>`;
+  }).join("");
+  if (live) {
+    const waiting = approvals.length > 0;
+    html += `<div class="msg ai${seen.has("live") ? "" : " new"}">${aiHead(null, waiting ? "wait" : "busy")}<div class="ai-body">${stepsLive(live.tools, waiting)}<div class="md ${waiting ? "" : "typing"}">${md(live.text)}</div></div></div>`;
+  }
+  html += approvals.map(a => `
+    <div class="ticket">
+      <div class="t-side">${orb(34, "wait")}</div>
+      <div class="t-main">
+        <div class="t-kick">需要你确认</div>
+        <div class="t-title">${esc(a.summary)}</div>
+        <pre>${approvalDetail(a)}</pre>
+        <div class="t-acts">
+          <button class="btn" data-deny="${a.id}">${icon("x", 15)}拒绝</button>
+          <button class="btn primary" data-allow="${a.id}">${icon("check", 15)}同意</button>
+        </div>
+      </div>
+    </div>`).join("");
+  const box = $("messages");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  $("list").innerHTML = html;
+  messages.forEach(m => seen.add(m.id));
+  if (live) seen.add("live");
+  linkifyPaths($("list"));
+  if (atBottom || approvals.length) box.scrollTop = box.scrollHeight;
 }
 
 function approvalDetail(a) {
@@ -185,89 +459,24 @@ function approvalDetail(a) {
   return esc(JSON.stringify(i, null, 1));
 }
 
-function sessRow(s, showOwner = false) {
-  return `<div class="sess ${s.id === current ? "active" : ""}" data-id="${s.id}">
-      ${s.running ? '<span class="dot"></span>' : ""}
-      <span class="t">${esc(s.title)}</span>
-      ${showOwner ? `<span class="meta" style="margin:0">${ftime(s.updated)}</span>` : ""}
-      ${s.pending ? '<span class="warn">待确认</span>' : ""}
-      ${showOwner ? "" : `<button class="x" data-del="${s.id}" title="删除">✕</button>`}
-    </div>`;
-}
-
-function renderSessions() {
-  $("sessions").innerHTML = sessions.map(s => sessRow(s)).join("") ||
-    '<div class="meta" style="padding:8px 10px">还没有会话，直接在右边输入开始</div>';
-}
-
-const isMine = () => !currentSess || currentSess.user_id === me.id;
-
-function renderTop() {
-  const s = currentSess;
-  const mine = isMine();
-  $("title").textContent = s ? s.title : "新会话";
-  const running = !!(s && s.running);
-  $("stopBtn").hidden = !running;
-  $("sendBtn").disabled = running;
-  $("bypassWrap").hidden = !me.can_bypass || (s && s.source === "voice") || !mine;
-  $("bypass").checked = !!(s && s.bypass);
-  $("bypass").disabled = !s;
-  $("bypassWrap").classList.toggle("on", !!(s && s.bypass));
-  $("stepsBtn").disabled = !s;
-  const wd = s ? s.work_dir : (composer.workDir || "");
-  $("wdBtn").textContent = "📂 " + (wd ? baseName(wd) : "工作文件夹：默认");
-  $("wdBtn").title = (wd || "默认工作目录") + "\n工作文件夹：Claude 在这个文件夹里干活。只能在会话开始前选";
-  $("wdBtn").disabled = !mine || !!(s && s.claude_session);
-  $("composer").hidden = !mine;
-  $("otherBanner").hidden = mine;
-  if (!mine) $("otherBanner").innerHTML = `👁 这是 <b>${esc(s.owner)}</b> 的会话，只能查看${s.source === "voice" ? "（板子语音）" : ""}。待确认的操作你可以代为处理。`;
-  renderLinks();
-}
-
-function chipsHtml(meta) {
-  const refs = (meta && meta.refs) || [];
-  const skill = meta && meta.skill;
-  if (!refs.length && !skill) return "";
-  return '<div class="chips">' + (skill ? `<span class="chip skill">🧩 ${esc(skill)}</span>` : "") +
-    refs.map(r => `<span class="chip ref" data-fpath="${esc(r)}" title="${esc(r)}">📎 ${esc(baseName(r))}</span>`).join("") + "</div>";
-}
-
-function renderMessages() {
-  if (!me) return;
-  renderTop();
-  if (!messages.length && !live && !approvals.length) {
-    $("list").innerHTML = `<div class="empty">Claude 在台式机上干活，文件库是 D 盘。<br>
-      📎 引用文件库里的文件，💻 把本机文件交给 Claude，🧩 选用技能。<br>
-      删除、移动文件和运行命令前会在这里请你确认。</div>`;
+$("list").addEventListener("click", e => {
+  const card = e.target.closest(".w-card");
+  if (card) {
+    const act = card.dataset.act;
+    if (act.startsWith("fill:")) { $("input").value = act.slice(5); autosize(); $("input").focus(); }
+    if (act === "ref") showFiles();
+    if (act === "local") $("localBtn").click();
+    if (act === "skill") { if (mySkills.length) openSkillPop(); else loadSkills().then(openMySkills); }
     return;
   }
-  let html = messages.map(m => {
-    const meta = m.meta || {};
-    if (m.role === "user") {
-      const tag = meta.bypass ? " · 完全放行" : "";
-      return `<div class="msg user">${chipsHtml(meta)}<div class="body">${esc(m.content)}</div><div class="meta">${esc(meta.author || "")}${tag}</div></div>`;
-    }
-    if (m.role === "event") return `<div class="msg event">${esc(m.content)}</div>`;
-    const info = [meta.seconds != null ? meta.seconds + " 秒" : "", meta.cost ? "$" + meta.cost.toFixed(4) : ""].filter(Boolean).join(" · ");
-    const body = m.role === "error" ? esc(m.content) : md(m.content);
-    return `<div class="msg ${m.role}">${toolChips(meta.tools)}<div class="body">${body}</div>${info ? `<div class="meta">${info}</div>` : ""}</div>`;
-  }).join("");
-  if (live) html += `<div class="msg assistant">${toolChips(live.tools)}<div class="body ${approvals.length ? "" : "typing"}">${md(live.text)}</div></div>`;
-  html += approvals.map(a => `
-    <div class="approval">
-      <strong>⚠ 需要确认：</strong>${esc(a.summary)}
-      <pre>${approvalDetail(a)}</pre>
-      <div class="acts">
-        <button class="btn" data-deny="${a.id}">拒绝</button>
-        <button class="btn primary" data-allow="${a.id}">同意</button>
-      </div>
-    </div>`).join("");
-  const box = $("messages");
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-  $("list").innerHTML = html;
-  linkifyPaths($("list"));
-  if (atBottom || approvals.length) box.scrollTop = box.scrollHeight;
-}
+  const id = e.target.closest("[data-allow],[data-deny]");
+  if (id) {
+    const allow = !!id.dataset.allow;
+    id.closest(".ticket").querySelectorAll("button").forEach(b => b.disabled = true);
+    id.closest(".ticket").animate([{ opacity: 1 }, { opacity: .4, transform: "scale(.98)" }], { duration: 250, fill: "forwards" });
+    post("/api/approvals/" + (id.dataset.allow || id.dataset.deny), { allow }).catch(err => toast(err.message, "err"));
+  }
+});
 
 async function loadSessions() {
   sessions = await api("/api/sessions");
@@ -277,16 +486,19 @@ async function loadSessions() {
 async function openSession(id) {
   current = id;
   $("side").classList.remove("open");
+  seen.clear(); liveSteps = 0;
   if (!id) {
     currentSess = null; messages = []; live = null; approvals = []; links = [];
-    renderSessions(); renderMessages(); $("input").focus(); return;
+    renderSessions(); renderMessages(true); $("input").focus(); return;
   }
   const data = await api("/api/sessions/" + id);
   if (current !== id) return;
   currentSess = data.session; messages = data.messages; live = data.live; approvals = data.approvals;
   links = await api(`/api/sessions/${id}/links`).catch(() => []);
-  renderSessions(); renderMessages();
+  renderSessions(); renderMessages(true);
+  $("messages").style.scrollBehavior = "auto";
   $("messages").scrollTop = $("messages").scrollHeight;
+  $("messages").style.scrollBehavior = "";
 }
 
 function upsertSession(s) {
@@ -298,7 +510,7 @@ function upsertSession(s) {
     renderSessions();
   }
   if (window.adminOnSession) window.adminOnSession(s);
-  if (s.id === current) { currentSess = s; if (!s.running) live = null; renderMessages(); }
+  if (s.id === current) { currentSess = s; if (!s.running) { live = null; liveSteps = 0; } renderMessages(); }
 }
 
 function notify(text) {
@@ -319,8 +531,8 @@ function connect() {
     if (!F.roots.length) api("/api/files").then(d => { F.roots = d.roots; F.office = d.office; renderMessages(); }).catch(() => {});
   };
   es.onerror = () => {
-    $("conn").textContent = "连接中断，正在重连…";
-    api("/api/me").then(u => { me = { ...me, ...u }; }).catch(() => {});  // 登录失效时会弹出登录框
+    $("conn").textContent = "重新连接中";
+    api("/api/me").then(u => { me = { ...me, ...u }; }).catch(() => {});  // 登录失效时会弹出登录页
   };
   es.onmessage = e => {
     const ev = JSON.parse(e.data);
@@ -335,8 +547,8 @@ function connect() {
     if (sid !== current) return;
     if (ev.type === "message") {
       if (!messages.some(m => m.id === ev.message.id)) messages.push(ev.message);
-      if (ev.message.role === "user") live = { text: "", tools: [] };
-      else if (ev.message.role !== "event") live = null;
+      if (ev.message.role === "user") { live = { text: "", tools: [] }; liveSteps = 0; seen.delete("live"); }
+      else if (ev.message.role !== "event") { live = null; liveSteps = 0; }
     } else if (ev.type === "approval") { approvals.push(ev.approval); }
     else if (ev.type === "approval_done") { approvals = approvals.filter(a => a.id !== ev.id); }
     else if (ev.type === "delta_reset") { live = { text: "", tools: live ? live.tools : [] }; }
@@ -357,36 +569,36 @@ async function ensureSession(title) {
 
 async function send() {
   const text = $("input").value.trim();
-  if (!text || $("sendBtn").disabled) return;
+  if (!text || $("sendBtn").disabled || !$("sendBtn").offsetParent) return;
   $("sendBtn").disabled = true;
   if (!IS_DESKTOP && "Notification" in window && Notification.permission === "default") Notification.requestPermission();
   try {
     const sid = await ensureSession(text);
     await post(`/api/sessions/${sid}/messages`, { text, refs: composer.refs.map(r => r.path), skill: composer.skill });
     $("input").value = ""; autosize(); resetComposer();
-  } catch (e) { alert(e.message); }
-  finally { renderTop(); }
+  } catch (e) { toast(e.message, "err"); }
+  finally { $("sendBtn").disabled = false; renderTop(); }
 }
 
 async function showSteps() {
   if (!current) return;
-  $("steps").innerHTML = '<div class="meta">读取中…</div>';
+  $("steps").innerHTML = '<div class="empty-note">读取中…</div>';
   $("stepsNote").textContent = "";
   $("stepsBox").classList.add("show");
   try {
     const data = await api(`/api/sessions/${current}/transcript`);
     $("stepsNote").textContent = data.note || "";
-    const label = { user: "用户", assistant: "Claude", thinking: "思考", tool_use: "调用工具", tool_result: "工具返回" };
-    $("steps").innerHTML = data.steps.map(s => `
-      <div class="step ${s.kind} ${s.error ? "err" : ""}">
+    const label = { user: "用户", assistant: "CLAUDE", thinking: "思考", tool_use: "调用工具", tool_result: "工具返回" };
+    $("steps").innerHTML = data.steps.map((s, i) => `
+      <div class="step ${s.kind} ${s.error ? "err" : ""}" style="animation-delay:${Math.min(i, 20) * 15}ms">
         <div class="k">${label[s.kind] || s.kind}${s.name ? " · " + esc(s.name) : ""}</div>
         <pre>${esc(s.text)}</pre>
-      </div>`).join("") || '<div class="meta">没有记录</div>';
+      </div>`).join("") || '<div class="empty-note">没有记录</div>';
     $("steps").scrollTop = $("steps").scrollHeight;
-  } catch (e) { $("steps").innerHTML = `<div class="meta">${esc(e.message)}</div>`; }
+  } catch (e) { $("steps").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
 
-function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 240) + "px"; }
+function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 260) + "px"; }
 
 // ---------- 输入框上方：引用、技能 ----------
 
@@ -394,8 +606,9 @@ function resetComposer() { composer.refs = []; composer.skill = ""; renderCompos
 
 function renderComposerChips() {
   $("composerChips").innerHTML =
-    (composer.skill ? `<span class="chip skill">🧩 ${esc(composer.skill)}<button data-unskill title="不用这个技能">✕</button></span>` : "") +
-    composer.refs.map((r, i) => `<span class="chip ref" data-fpath="${esc(r.path)}" title="${esc(r.abs)}">${r.dir ? "📁" : "📎"} ${esc(r.name)}<button data-unref="${i}" title="移除">✕</button></span>`).join("");
+    (composer.skill ? `<span class="chip skill">${icon("puzzle", 12)}<span>${esc(composer.skill)}</span><button data-unskill title="不用这个技能">${icon("x", 12)}</button></span>` : "") +
+    composer.refs.map((r, i) => `<span class="chip ref" data-fpath="${esc(r.path)}" title="${esc(r.abs)}">${icon(r.dir ? "folder" : "clip", 12)}<span>${esc(r.name)}</span><button data-unref="${i}" title="移除">${icon("x", 12)}</button></span>`).join("");
+  $("skillBtn").classList.toggle("on", !!composer.skill);
 }
 
 function addRef(entry) {
@@ -405,8 +618,9 @@ function addRef(entry) {
 }
 
 $("composerChips").onclick = e => {
-  if (e.target.dataset.unref !== undefined) { composer.refs.splice(+e.target.dataset.unref, 1); renderComposerChips(); return; }
-  if (e.target.dataset.unskill !== undefined) { composer.skill = ""; renderComposerChips(); return; }
+  const un = e.target.closest("[data-unref]");
+  if (un) { composer.refs.splice(+un.dataset.unref, 1); renderComposerChips(); return; }
+  if (e.target.closest("[data-unskill]")) { composer.skill = ""; renderComposerChips(); return; }
   const chip = e.target.closest("[data-fpath]");
   if (chip) showFiles(chip.dataset.fpath);
 };
@@ -415,15 +629,14 @@ async function loadSkills() {
   mySkills = await api("/api/skills/mine").catch(() => []);
 }
 
-$("skillBtn").onclick = e => {
-  e.stopPropagation();
+function openSkillPop() {
   const pop = $("skillPop");
-  if (!pop.hidden) { pop.hidden = true; return; }
-  pop.innerHTML = (mySkills.length ? mySkills.map(s => `<div class="it" data-skill="${esc(s.name)}"><b>${esc(s.name)}</b><div class="d">${esc(s.description)}</div></div>`).join("")
-    : '<div class="meta" style="padding:8px">管理员还没给你分配技能。</div>')
-    + '<div class="it" data-skills-mgr style="border-top:1px solid var(--border);margin-top:4px">📤 提交新技能 / 查看我的提交</div>';
+  pop.innerHTML = (mySkills.length ? mySkills.map(s => `<div class="it" data-skill="${esc(s.name)}"><span class="ii">${icon("puzzle", 15)}</span><div><b>${esc(s.name)}</b><small>${esc(s.description)}</small></div></div>`).join("")
+    : '<div class="empty-note" style="padding:10px 12px">管理员还没给你分配技能。</div>')
+    + `<div class="sep"></div><div class="it" data-skills-mgr><span class="ii">${icon("upload", 15)}</span><div><b>提交新技能</b><small>查看我的提交和审核状态</small></div></div>`;
   pop.hidden = false;
-};
+}
+$("skillBtn").onclick = e => { e.stopPropagation(); if ($("skillPop").hidden) openSkillPop(); else $("skillPop").hidden = true; };
 $("skillPop").onclick = e => {
   const it = e.target.closest(".it");
   if (!it) return;
@@ -431,7 +644,6 @@ $("skillPop").onclick = e => {
   if (it.dataset.skillsMgr !== undefined) return openMySkills();
   composer.skill = it.dataset.skill; renderComposerChips(); $("input").focus();
 };
-document.addEventListener("click", e => { if (!e.target.closest(".anchor")) $("skillPop").hidden = true; });
 
 // ---------- 本机文件：上传到台式机工作区，处理完同步回来 ----------
 
@@ -439,37 +651,38 @@ async function uploadFiles(files, name) {
   // files: [{file: File, rel: "子目录/a.txt"}]
   if (!files.length) return;
   const total = files.reduce((n, f) => n + f.file.size, 0);
-  if (total > 2 * 1073741824) return alert("一次最多上传 2 GB");
+  if (total > 2 * 1073741824) return toast("一次最多上传 2 GB", "err");
   const sid = await ensureSession(name);
   const link = await post(`/api/sessions/${sid}/links`, { name });
   let done = 0;
   for (const f of files) {
-    flash(`正在上传 ${++done}/${files.length}：${f.rel}`, 1500);
+    if (++done % 5 === 1 || files.length < 6) flash(`正在上传 ${done}/${files.length}：${f.rel}`, 1400);
     await api(`/api/sessions/${sid}/links/${link.id}/file?path=${encodeURIComponent(f.rel)}`, { method: "PUT", body: f.file, raw: true });
   }
   await post(`/api/sessions/${sid}/links/${link.id}/snapshot`);
   links = await api(`/api/sessions/${sid}/links`);
   addRef({ abs: link.abs, name: link.name, dir: true });
   renderTop();
-  flash(`已上传 ${files.length} 个文件（${fsize(total)}），已引用到对话里`);
+  toast(`已上传 ${files.length} 个文件（${fsize(total)}），已引用到对话里`, "ok");
 }
 
 $("localBtn").onclick = () => {
   if (!isMine()) return;
   const buttons = [
-    { label: "选择文件…", onClick: () => { $("uploadInput").click(); } },
-    { label: "选择文件夹…", onClick: () => { $("uploadDirInput").click(); } },
+    { label: "选择文件", icon: "file", onClick: () => { $("uploadInput").click(); } },
+    { label: "选择文件夹", icon: "folder", onClick: () => { $("uploadDirInput").click(); } },
   ];
-  if (IS_DESKTOP) buttons.unshift({ label: "添加本机文件夹（可同步回来）", primary: true, onClick: addLocalFolder });
-  dialog("把本机文件交给 Claude", `<p style="margin:0 0 8px">文件会上传到台式机上你自己的工作区（别人看不到），Claude 在那里处理。</p>
-    ${IS_DESKTOP ? "<p style='margin:0 0 8px'><b>添加本机文件夹</b>：处理完可以一键把改动同步回这台电脑的原文件夹（覆盖前会自动备份）。</p>" : ""}
-    <p class="meta" style="margin:0">也可以直接把文件拖进窗口。${IS_DESKTOP ? "" : "处理结果可以在“📁 文件 → 我的工作区”里下载。"}</p>`, buttons);
+  if (IS_DESKTOP) buttons.push({ label: "添加本机文件夹", icon: "sync", primary: true, onClick: addLocalFolder });
+  dialog("把本机文件交给 Claude", `
+    <p style="margin:0 0 10px">文件会上传到台式机上<b>你自己的工作区</b>（别人看不到），Claude 在那里用台式机的技能处理。</p>
+    ${IS_DESKTOP ? `<div class="card" style="margin:0 0 10px"><h4>${icon("sync", 16)}添加本机文件夹</h4><div class="muted" style="font-size:13px">处理完可以一键把改动同步回这台电脑的原文件夹，覆盖前会自动备份。</div></div>` : ""}
+    <p class="muted" style="margin:0;font-size:13px">也可以直接把文件拖进窗口。${IS_DESKTOP ? "" : "处理结果可以在“文件库 → 我的工作区”里下载。"}</p>`, buttons);
 };
 
 $("uploadInput").onchange = async e => {
   const files = [...e.target.files].map(f => ({ file: f, rel: f.name }));
   e.target.value = "";
-  try { await uploadFiles(files, "上传的文件"); } catch (err) { alert(err.message); }
+  try { await uploadFiles(files, "上传的文件"); } catch (err) { toast(err.message, "err"); }
 };
 $("uploadDirInput").onchange = async e => {
   const list = [...e.target.files];
@@ -477,20 +690,20 @@ $("uploadDirInput").onchange = async e => {
   if (!list.length) return;
   const top = list[0].webkitRelativePath.split("/")[0];
   const files = list.map(f => ({ file: f, rel: f.webkitRelativePath.split("/").slice(1).join("/") || f.name }));
-  try { await uploadFiles(files, top); } catch (err) { alert(err.message); }
+  try { await uploadFiles(files, top); } catch (err) { toast(err.message, "err"); }
 };
 
 async function addLocalFolder() {
   try {
     const sid = await ensureSession("本机文件");
-    flash("选择文件夹后会开始上传，文件多的话要等一会儿…", 3000);
+    flash("选好文件夹后开始上传，文件多的话要等一会儿…", 3000);
     const r = await invoke("upload_local_folder", { sessionId: sid, token });
     if (!r) return;  // 取消了
     links = await api(`/api/sessions/${sid}/links`);
     addRef({ abs: r.abs, name: r.name, dir: true });
     renderTop();
-    flash(`已上传 ${r.files} 个文件（${fsize(r.bytes)}），已引用到对话里`);
-  } catch (err) { alert(String(err)); }
+    toast(`已上传 ${r.files} 个文件（${fsize(r.bytes)}），已引用到对话里`, "ok");
+  } catch (err) { toast(String(err), "err", 6000); }
 }
 
 // 拖文件进窗口
@@ -518,44 +731,51 @@ window.addEventListener("drop", async e => {
   const entries = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
   if (entries.length) for (const en of entries) await walk(en, "");
   else files.push(...[...e.dataTransfer.files].map(f => ({ file: f, rel: f.name })));
-  const name = entries.length === 1 && entries[0].isDirectory ? entries[0].name : "上传的文件";
-  try { await uploadFiles(files, name); } catch (err) { alert(err.message); }
+  // 只拖了一个文件夹：去掉最外层，直接用文件夹名
+  let name = "上传的文件";
+  if (entries.length === 1 && entries[0].isDirectory) {
+    name = entries[0].name;
+    files.forEach(f => { f.rel = f.rel.slice(name.length + 1); });
+  }
+  try { await uploadFiles(files, name); } catch (err) { toast(err.message, "err"); }
 });
 
 function renderLinks() {
   const bar = $("linksBar");
   if (!links.length || !currentSess) { bar.hidden = true; return; }
   bar.hidden = false;
-  bar.innerHTML = "💻 本机文件：" + links.map(l => `<span class="chip ref" data-fpath="${esc(l.path)}" title="${esc(l.abs)}">📁 ${esc(l.name)}</span>
-     ${isMine() ? `<button class="btn small" data-sync="${l.id}">查看改动 / 同步回本机</button>` : ""}`).join(" ");
+  bar.innerHTML = icon("laptop", 15) + "<span>本机文件</span>" + links.map(l => `<span class="chip ref" data-fpath="${esc(l.path)}" title="${esc(l.abs)}">${icon("folder", 12)}<span>${esc(l.name)}</span></span>
+     ${isMine() ? `<button class="btn small" data-sync="${l.id}">${icon("sync", 13)}查看改动 / 同步回本机</button>` : ""}`).join(" ");
 }
 
 $("linksBar").onclick = e => {
   const chip = e.target.closest("[data-fpath]");
   if (chip) return showFiles(chip.dataset.fpath);
-  if (e.target.dataset.sync) syncBack(e.target.dataset.sync);
+  const sync = e.target.closest("[data-sync]");
+  if (sync) syncBack(sync.dataset.sync);
 };
 
 async function syncBack(lid) {
   const sid = current;
   const link = links.find(l => l.id === lid);
   let ch;
-  try { ch = await api(`/api/sessions/${sid}/links/${lid}/changes`); } catch (e) { return alert(e.message); }
+  try { ch = await api(`/api/sessions/${sid}/links/${lid}/changes`); } catch (e) { return toast(e.message, "err"); }
   const n = ch.added.length + ch.modified.length;
   const local = IS_DESKTOP ? await invoke("local_link_path", { linkId: lid }).catch(() => null) : null;
-  const row = (it, tag) => `<div>${tag} <a class="fpath" data-fp="${esc(it.path)}">${esc(it.rel)}</a> <span class="meta">${fsize(it.size)}</span>
-     ${local ? "" : ` <a class="btn small" href="/api/files/raw?path=${encodeURIComponent(it.path)}&download=1&token=${encodeURIComponent(token)}" download>下载</a>`}</div>`;
+  const row = (it, tag, cls) => `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--line)">
+     <span class="status ${cls}">${tag}</span><a class="fpath" data-fp="${esc(it.path)}" style="flex:1">${esc(it.rel)}</a><span class="muted" style="font-size:12px">${fsize(it.size)}</span>
+     ${local ? "" : `<a class="btn small" href="/api/files/raw?path=${encodeURIComponent(it.path)}&download=1&token=${encodeURIComponent(token)}" download>${icon("download", 13)}</a>`}</div>`;
   const body = n || ch.deleted.length ? `
-    ${ch.added.map(i => row(i, "🆕 新增")).join("")}
-    ${ch.modified.map(i => row(i, "✏️ 修改")).join("")}
-    ${ch.deleted.map(r => `<div class="meta">🗑 Claude 删除了 ${esc(r)}（同步时不会删除你电脑上的文件）</div>`).join("")}
-    <p class="meta">${local ? `会写回到：${esc(local)}<br>被覆盖的文件会先备份到那里的 “.projector备份” 文件夹。` :
-      IS_DESKTOP ? "这个文件夹不是在这台电脑上添加的，只能逐个下载。" : "浏览器里不能直接写回你的文件夹，请逐个下载；用桌面软件“添加本机文件夹”可以一键同步。"}</p>`
-    : "<p>Claude 还没有改动这个文件夹里的文件。</p>";
+    ${ch.added.map(i => row(i, "新增", "approved")).join("")}
+    ${ch.modified.map(i => row(i, "修改", "pending")).join("")}
+    ${ch.deleted.map(r => `<div class="muted" style="padding:5px 0;font-size:13px">Claude 删除了 ${esc(r)}（同步时不会删除你电脑上的文件）</div>`).join("")}
+    <p class="muted" style="font-size:13px;margin:12px 0 0">${local ? `会写回到：<code>${esc(local)}</code><br>被覆盖的文件会先备份到那里的 “.projector备份” 文件夹。` :
+      IS_DESKTOP ? "这个文件夹不是在这台电脑上添加的，只能逐个下载。" : "浏览器不能直接写回你的文件夹，请逐个下载；用桌面软件“添加本机文件夹”可以一键同步。"}</p>`
+    : `<div style="text-align:center;padding:20px 0">${orb(48)}<p class="muted">Claude 还没有改动这个文件夹里的文件。</p></div>`;
   dialog(`“${link ? link.name : ""}” 的改动`, body, local && n ? [{
-    label: `同步 ${n} 个文件回本机`, primary: true, onClick: async () => {
+    label: `同步 ${n} 个文件回本机`, icon: "sync", primary: true, onClick: async () => {
       const r = await invoke("sync_back", { sessionId: sid, linkId: lid, token });
-      flash(`已写回 ${r.written} 个文件` + (r.backups ? `，备份了 ${r.backups} 个原文件` : ""));
+      toast(`已写回 ${r.written} 个文件` + (r.backups ? `，备份了 ${r.backups} 个原文件` : ""), "ok");
     },
   }] : [], true);
   $("dlgBody").onclick = e => { const a = e.target.closest("[data-fp]"); if (a) { closeDialog(); showFiles(a.dataset.fp); } };
@@ -581,7 +801,13 @@ const kindOf = name => {
   for (const k in EXT) if (EXT[k].split(" ").includes(ext)) return k;
   return "other";
 };
-const ICON = { dir: "📁", image: "🖼", pdf: "📕", video: "🎬", audio: "🎵", md: "📝", text: "📄", docx: "📘", sheet: "📊", office: "📙", other: "📦" };
+// 文件类型色块：扩展名缩写 + 颜色
+const KIND_COLOR = { image: "#c46ad6", pdf: "#d9443a", video: "#7a5cf0", audio: "#e0559b", md: "#5b6b7a", text: "#7d8a96", docx: "#2f6fd6", sheet: "#1f9a5a", office: "#e2742c", other: "#a39a8c" };
+function fileBadge(e) {
+  if (e.dir) return `<span class="fk" style="background:linear-gradient(135deg,#f3b45a,#e8892e)">${icon("folder", 15)}</span>`;
+  const k = kindOf(e.name), ext = (e.name.includes(".") ? e.name.split(".").pop() : "").slice(0, 4).toUpperCase() || "FILE";
+  return `<span class="fk" style="background:${KIND_COLOR[k]}">${esc(ext)}</span>`;
+}
 const fileUrl = (p, extra = "") => `/api/files/${extra || "raw"}?path=${encodeURIComponent(p)}&token=${encodeURIComponent(token)}`;
 
 const libs = {};
@@ -594,7 +820,7 @@ function loadScript(src) {
 }
 
 function renderCrumbs(crumbs) {
-  $("crumbs").innerHTML = crumbs.map(c => `<a data-go="${esc(c.path)}">${esc(c.label)}</a>`).join(" › ") + (F.searching ? " › 搜索结果" : "");
+  $("crumbs").innerHTML = crumbs.map(c => `<a data-go="${esc(c.path)}">${esc(c.label)}</a>`).join(" / ") + (F.searching ? " / 搜索结果" : "");
   const ws = F.path.startsWith("ws");
   $("areas").querySelectorAll("button").forEach(b => b.classList.toggle("on", (b.dataset.area === "ws:") === ws));
 }
@@ -602,18 +828,22 @@ function renderCrumbs(crumbs) {
 function renderList() {
   const list = F.entries;
   $("flist").innerHTML = list.length ? list.map((e, i) => `
-    <div class="fi ${e.path === F.sel ? "sel" : ""}" data-i="${i}" title="${esc(e.abs)}">
-      <span>${e.dir ? ICON.dir : ICON[kindOf(e.name)]}</span>
+    <div class="fi ${e.path === F.sel ? "sel" : ""}" data-i="${i}" title="${esc(e.abs)}" style="animation-delay:${Math.min(i, 25) * 12}ms">
+      ${fileBadge(e)}
       <span class="n">${esc(e.name)}${F.searching ? `<span class="sub">${esc(e.path)}</span>` : ""}</span>
       <span class="s">${e.dir ? "" : fsize(e.size) + " · "}${fdate(e.mtime)}</span>
-    </div>`).join("") : '<div class="meta" style="padding:12px">这里是空的</div>';
+    </div>`).join("") : '<div class="empty-note" style="padding:24px;text-align:center">这里是空的</div>';
   const sel = $("flist").querySelector(".sel");
   if (sel) sel.scrollIntoView({ block: "nearest" });
 }
 
+function fileEmpty(text, ic = "file") {
+  $("fcontent").innerHTML = `<div class="center"><div class="big">${icon(ic, 28)}</div>${text}</div>`;
+}
+
 async function openDir(path) {
   $("fq").value = ""; F.searching = false;
-  $("flist").innerHTML = '<div class="meta" style="padding:12px">读取中…</div>';
+  $("flist").innerHTML = '<div class="empty-note" style="padding:14px">读取中…</div>';
   try {
     const d = await api("/api/files?path=" + encodeURIComponent(path));
     Object.assign(F, { roots: d.roots, office: d.office, path: d.path, abs: d.abs, entries: d.entries });
@@ -621,7 +851,7 @@ async function openDir(path) {
     if (F.mode === "workdir") $("pickText").textContent = "当前：" + d.abs;
     if (d.select) { const e = d.entries.find(x => x.path === d.select); if (e) return preview(e); }
     renderList();
-  } catch (e) { $("flist").innerHTML = `<div class="meta" style="padding:12px">${esc(e.message)}</div>`; }
+  } catch (e) { $("flist").innerHTML = `<div class="err" style="padding:14px">${esc(e.message)}</div>`; }
 }
 
 let searchTimer;
@@ -630,15 +860,14 @@ $("fq").addEventListener("input", () => {
   const q = $("fq").value.trim();
   if (!q) return openDir(F.path);
   searchTimer = setTimeout(async () => {
-    $("flist").innerHTML = '<div class="meta" style="padding:12px">搜索中…</div>';
+    $("flist").innerHTML = '<div class="empty-note" style="padding:14px">搜索中…</div>';
     try {
       const d = await api(`/api/files/search?path=${encodeURIComponent(F.path)}&q=${encodeURIComponent(q)}`);
       if ($("fq").value.trim() !== q) return;
       F.searching = true; F.entries = d.results; renderList();
-      $("crumbs").insertAdjacentText("beforeend", "");
-      if (d.partial) $("flist").insertAdjacentHTML("beforeend", '<div class="meta" style="padding:8px">结果太多，只显示一部分，换个更具体的词试试</div>');
-    } catch (e) { $("flist").innerHTML = `<div class="meta" style="padding:12px">${esc(e.message)}</div>`; }
-  }, 400);
+      if (d.partial) $("flist").insertAdjacentHTML("beforeend", '<div class="empty-note" style="padding:10px">结果太多，只显示一部分，换个更具体的词试试</div>');
+    } catch (e) { $("flist").innerHTML = `<div class="err" style="padding:14px">${esc(e.message)}</div>`; }
+  }, 350);
 });
 
 async function preview(e) {
@@ -652,12 +881,11 @@ async function preview(e) {
   const box = $("fcontent");
   const kind = kindOf(e.name);
   const url = fileUrl(e.path);
-  const msg = t => box.innerHTML = `<div class="center">${t}</div>`;
   // 预览不了时的提示：桌面软件里给“用本机程序打开”，浏览器里给“下载”
-  const cannot = why => msg(`${esc(e.name)}<br>${fsize(e.size)} · ${fdate(e.mtime)}<br><br>${why}<br>`
-    + (IS_DESKTOP ? `可以用这台电脑上的软件打开。<br><button class="btn primary" data-local>用本机程序打开</button>`
-                  : `可以下载后用本机软件打开。<br><a class="btn primary" href="${url}&download=1" download="${esc(e.name)}">下载</a>`));
-  msg("加载中…");
+  const cannot = why => fileEmpty(`<b style="color:var(--ink)">${esc(e.name)}</b><br>${fsize(e.size)} · ${fdate(e.mtime)}<br><br>${why}<br>`
+    + (IS_DESKTOP ? `可以用这台电脑上的软件打开。<br><button class="btn primary" data-local>${icon("external", 15)}用本机程序打开</button>`
+                  : `可以下载后用本机软件打开。<br><a class="btn primary" href="${url}&download=1" download="${esc(e.name)}">${icon("download", 15)}下载</a>`), "file");
+  fileEmpty("加载中…", "clock");
   try {
     if (kind === "image") box.innerHTML = `<img src="${url}" alt="">`;
     else if (kind === "pdf") box.innerHTML = `<iframe src="${url}"></iframe>`;
@@ -666,8 +894,8 @@ async function preview(e) {
     else if (kind === "md" || kind === "text") {
       const d = await api("/api/files/text?path=" + encodeURIComponent(e.path));
       if (F.sel !== e.path) return;
-      const note = d.truncated ? '<div class="meta" style="padding:8px 16px">文件太大，只显示前 1 MB</div>' : "";
-      box.innerHTML = note + (kind === "md" ? `<div class="mdv msg">${md(d.text)}</div>` : `<pre>${esc(d.text)}</pre>`);
+      const note = d.truncated ? '<div class="empty-note" style="padding:8px 18px">文件太大，只显示前 1 MB</div>' : "";
+      box.innerHTML = note + (kind === "md" ? `<div class="mdv md">${md(d.text)}</div>` : `<pre>${esc(d.text)}</pre>`);
     } else if (kind === "docx") {
       if (e.size > 50 * 1048576) return cannot("文件太大，不适合在这里预览。");
       await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
@@ -684,8 +912,8 @@ async function preview(e) {
       const wb = XLSX.read(buf, { type: "array", codepage: 936 });
       const show = name => {
         const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { header: "", footer: "" });
-        box.innerHTML = `<div class="tabs">${wb.SheetNames.map(n => `<button class="${n === name ? "on" : ""}" data-sheet="${esc(n)}">${esc(n)}</button>`).join("")}</div>`
-          + `<div class="sheet">${window.DOMPurify ? DOMPurify.sanitize(html) : html}</div>`;
+        box.innerHTML = `<div class="sheet"><div class="tabs">${wb.SheetNames.map(n => `<button class="${n === name ? "on" : ""}" data-sheet="${esc(n)}">${esc(n)}</button>`).join("")}</div>`
+          + `${window.DOMPurify ? DOMPurify.sanitize(html) : html}</div>`;
         box.querySelectorAll("[data-sheet]").forEach(b => b.onclick = () => show(b.dataset.sheet));
       };
       show(wb.SheetNames[0]);
@@ -706,6 +934,7 @@ function showFiles(path = null, mode = "browse") {
   $("pickbar").hidden = mode !== "workdir";
   $("frefDir").hidden = mode !== "browse" || !isMine();
   if (mode === "workdir") $("pickText").textContent = "选一个文件夹作为这个会话的工作文件夹";
+  if (!F.sel) fileEmpty("选择左边的文件预览", "eye");
   $("filesBox").classList.add("show");
   $("side").classList.remove("open");
   if (path !== null) openDir(path);
@@ -723,7 +952,7 @@ function linkifyPaths(container) {
   const tail = `[^\\s<>"'\`|*?，。；：、！？（）()【】「」]*[^\\s<>"'\`|*?，。；：、！？（）()【】「」.,:;]`;
   const re = new RegExp(`(?:${parts.join("|")})${tail}`, "gi");
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
-    acceptNode: n => n.parentElement.closest("a, textarea, .approval, .chip") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    acceptNode: n => n.parentElement.closest("a, textarea, .ticket, .chip, .tl") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
   });
   const nodes = [];
   while (walker.nextNode()) if (walker.currentNode.nodeValue.match(re)) nodes.push(walker.currentNode);
@@ -732,8 +961,12 @@ function linkifyPaths(container) {
     let last = 0;
     node.nodeValue.replace(re, (m, idx) => {
       frag.append(node.nodeValue.slice(last, idx));
+      // 显示成“文件名小标签”：完整路径太长，放在悬停提示里
       const a = document.createElement("a");
-      a.className = "fpath"; a.textContent = m; a.dataset.fpath = m; a.title = "点击预览";
+      const name = baseName(m), isDir = !/\.[A-Za-z0-9]{1,6}$/.test(name);
+      a.className = "fchip"; a.dataset.fpath = m; a.title = m + "\n点击预览";
+      a.innerHTML = (isDir ? icon("folder", 13) : `<i style="background:${KIND_COLOR[kindOf(name)]}"></i>`) + "<span></span>";
+      a.querySelector("span").textContent = name;
       frag.append(a); last = idx + m.length;
     });
     frag.append(node.nodeValue.slice(last));
@@ -743,15 +976,15 @@ function linkifyPaths(container) {
 
 async function openLocal() {
   const btns = document.querySelectorAll("#flocal, [data-local]");
-  btns.forEach(b => { b.disabled = true; b.dataset.label = b.textContent; b.textContent = "正在下载…"; });
+  btns.forEach(b => { b.disabled = true; });
   try {
     await invoke("open_remote_file", { path: F.sel, token });
-    flash("已用本机程序打开。这是一份副本，修改后不会保存回台式机。");
-  } catch (err) { alert(String(err)); }
-  finally { btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.label; }); }
+    toast("已用本机程序打开。这是一份副本，修改后不会保存回台式机。", "ok", 5000);
+  } catch (err) { toast(String(err), "err", 6000); }
+  finally { btns.forEach(b => { b.disabled = false; }); }
 }
 
-$("areas").onclick = e => { if (e.target.dataset.area !== undefined) openDir(e.target.dataset.area); };
+$("areas").onclick = e => { const b = e.target.closest("[data-area]"); if (b) openDir(b.dataset.area); };
 $("crumbs").onclick = e => { if (e.target.dataset.go !== undefined) openDir(e.target.dataset.go); };
 $("flist").onclick = e => {
   const row = e.target.closest(".fi");
@@ -763,7 +996,7 @@ $("flist").onclick = e => {
 $("fback").onclick = () => $("fbody").classList.remove("viewing");
 $("flocal").onclick = openLocal;
 $("fcontent").addEventListener("click", e => { if (e.target.closest("[data-local]")) openLocal(); });
-$("fref").onclick = () => { addRef(F.selEntry); flash("已引用：" + F.selEntry.name, 2000); };
+$("fref").onclick = () => { addRef(F.selEntry); toast("已引用：" + F.selEntry.name, "ok", 2000); };
 $("frefDir").onclick = () => {
   addRef({ abs: F.abs, name: baseName(F.abs), dir: true });
   $("filesBox").classList.remove("show"); $("input").focus();
@@ -774,7 +1007,8 @@ $("pickOk").onclick = async () => {
     else composer.workDir = F.abs;
     $("filesBox").classList.remove("show");
     renderTop();
-  } catch (e) { alert(e.message); }
+    toast("工作文件夹：" + baseName(F.abs), "ok");
+  } catch (e) { toast(e.message, "err"); }
 };
 $("messages").addEventListener("click", e => {
   const a = e.target.closest("[data-fpath]");
@@ -786,20 +1020,21 @@ $("messages").addEventListener("click", e => {
 async function openMySkills() {
   const subs = await api("/api/skills/submissions").catch(() => []);
   const st = { pending: "待审核", approved: "已入库", rejected: "未通过" };
+  const mine = subs.filter(s => s.submitted_by === me.id);
   const body = dialog("技能", `
-    <h4 style="margin:0 0 6px">我能用的技能</h4>
-    ${mySkills.length ? mySkills.map(s => `<div class="card"><b>${esc(s.name)}</b><div class="meta">${esc(s.description)}</div></div>`).join("") : '<p class="meta">还没有，管理员分配后会出现在这里。</p>'}
-    <h4 style="margin:14px 0 6px">提交新技能</h4>
-    <p class="meta" style="margin:0 0 8px">技能是一个文件夹，里面必须有 SKILL.md（开头写 name 和 description）。提交后由管理员审核，通过后入库。</p>
+    <div style="font-weight:600;margin-bottom:8px">我能用的技能</div>
+    ${mySkills.length ? mySkills.map(s => `<div class="card" style="padding:10px 14px"><h4>${icon("puzzle", 15)}${esc(s.name)}</h4><div class="muted" style="font-size:13px">${esc(s.description)}</div></div>`).join("") : '<p class="empty-note">还没有，管理员分配后会出现在这里。</p>'}
+    <div style="font-weight:600;margin:18px 0 6px">提交新技能</div>
+    <p class="muted" style="margin:0 0 10px;font-size:13px">技能是一个文件夹，里面必须有 SKILL.md（开头写 name 和 description）。提交后由管理员审核，通过后入库。</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn small" id="skZip">上传 zip 压缩包…</button>
-      <button class="btn small" id="skDir">选择技能文件夹…</button>
+      <button class="btn small" id="skZip">${icon("upload", 14)}上传 zip 压缩包</button>
+      <button class="btn small" id="skDir">${icon("folder", 14)}选择技能文件夹</button>
     </div>
     <input type="file" id="skZipIn" accept=".zip" hidden><input type="file" id="skDirIn" webkitdirectory hidden>
-    <div class="err" id="skErr"></div>
-    <h4 style="margin:14px 0 6px">我的提交</h4>
-    ${subs.filter(s => s.submitted_by === me.id).map(s => `<div class="card"><b>${esc(s.name)}</b> <span class="status ${s.status}">${st[s.status] || s.status}</span>
-      <div class="meta">${ftime(s.created)}${s.note ? " · 管理员备注：" + esc(s.note) : ""}</div></div>`).join("") || '<p class="meta">还没有提交过。</p>'}
+    <div class="err" id="skErr" style="margin-top:6px"></div>
+    <div style="font-weight:600;margin:12px 0 6px">我的提交</div>
+    ${mine.map(s => `<div class="card" style="padding:10px 14px"><h4>${esc(s.name)} <span class="status ${s.status}">${st[s.status] || s.status}</span></h4>
+      <div class="muted" style="font-size:12.5px">${ftime(s.created)}${s.note ? " · 管理员备注：" + esc(s.note) : ""}</div></div>`).join("") || '<p class="empty-note">还没有提交过。</p>'}
   `, [], true);
   body.querySelector("#skZip").onclick = () => body.querySelector("#skZipIn").click();
   body.querySelector("#skDir").onclick = () => body.querySelector("#skDirIn").click();
@@ -809,7 +1044,7 @@ async function openMySkills() {
       const sub = await post("/api/skills/submissions");
       await upload(sub.id);
       const r = await post(`/api/skills/submissions/${sub.id}/submit`);
-      flash(`已提交技能 ${r.name}，等管理员审核`);
+      toast(`已提交技能 ${r.name}，等管理员审核`, "ok");
       openMySkills();
     } catch (e) { body.querySelector("#skErr").textContent = e.message; }
   };
@@ -827,16 +1062,88 @@ async function openMySkills() {
     });
   };
 }
-$("skillsLink").onclick = () => { loadSkills().then(openMySkills); };
+
+// ---------- 命令面板（⌘K / Ctrl+K） ----------
+
+let palItems = [], palSel = 0;
+function paletteActions() {
+  const acts = [
+    ["plus", "新会话", "", () => { resetComposer(); openSession(null); }],
+    ["folder", "打开文件库", "", () => showFiles()],
+    ["clip", "引用文件到对话", "@", () => showFiles()],
+    ["laptop", "把本机文件交给 Claude", "", () => $("localBtn").click()],
+    ["puzzle", "选择技能", "", () => openSkillPop()],
+    ["upload", "提交新技能", "", () => loadSkills().then(openMySkills)],
+    ["user", "更换头像", "", pickAvatar],
+    [store.get("theme") === "dark" ? "sun" : "moon", "切换主题", "", () => { $("userMenu").hidden = true; const o = ["auto", "light", "dark"], c = store.get("theme") || "auto", n = o[(o.indexOf(c) + 1) % 3]; store.set("theme", n); applyTheme(n); toast("主题：" + THEMES[n][0]); }],
+    ["key", "修改密码", "", changePassword],
+  ];
+  if (me.role === "admin") acts.push(["shield", "打开管理后台", "", () => window.openAdmin()]);
+  if (current) acts.splice(1, 0, ["steps", "查看完整过程", "", showSteps]);
+  return acts;
+}
+function renderPalette() {
+  const q = $("palQ").value.trim().toLowerCase();
+  const acts = paletteActions().filter(a => !q || a[1].toLowerCase().includes(q));
+  const ss = sessions.filter(s => !q || s.title.toLowerCase().includes(q)).slice(0, q ? 20 : 6);
+  palItems = [...acts.map(a => ({ kind: "act", ic: a[0], label: a[1], hint: a[2], run: a[3] })),
+    ...ss.map(s => ({ kind: "sess", ic: s.source === "voice" ? "mic" : "chat", label: s.title, hint: rel(s.updated), run: () => openSession(s.id) }))];
+  palSel = Math.min(palSel, Math.max(0, palItems.length - 1));
+  let html = "", lastKind = "";
+  palItems.forEach((it, i) => {
+    if (it.kind !== lastKind) { html += `<div class="pgrp">${it.kind === "act" ? "操作" : "会话"}</div>`; lastKind = it.kind; }
+    html += `<div class="pi ${i === palSel ? "on" : ""}" data-i="${i}">${icon(it.ic, 16)}<span>${esc(it.label)}</span><span class="ph">${esc(it.hint)}</span></div>`;
+  });
+  $("palList").innerHTML = html || '<div class="empty-note" style="padding:16px;text-align:center">没有匹配的结果</div>';
+  $("palList").querySelector(".pi.on")?.scrollIntoView({ block: "nearest" });
+}
+function openPalette() {
+  if (!me) return;
+  $("palQ").value = ""; palSel = 0; renderPalette();
+  $("palette").classList.add("show");
+  setTimeout(() => $("palQ").focus(), 30);
+}
+function runPal(i) {
+  const it = palItems[i];
+  if (!it) return;
+  $("palette").classList.remove("show");
+  setTimeout(it.run, 60);
+}
+$("palQ").addEventListener("input", () => { palSel = 0; renderPalette(); });
+$("palQ").addEventListener("keydown", e => {
+  if (e.key === "ArrowDown") { e.preventDefault(); palSel = Math.min(palSel + 1, palItems.length - 1); renderPalette(); }
+  if (e.key === "ArrowUp") { e.preventDefault(); palSel = Math.max(palSel - 1, 0); renderPalette(); }
+  if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); runPal(palSel); }
+});
+$("palList").onclick = e => { const p = e.target.closest(".pi"); if (p) runPal(+p.dataset.i); };
+$("palList").onmousemove = e => {
+  const p = e.target.closest(".pi");
+  if (p && +p.dataset.i !== palSel) { palSel = +p.dataset.i; $("palList").querySelectorAll(".pi").forEach(x => x.classList.toggle("on", x === p)); }
+};
+
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    if ($("palette").classList.contains("show")) $("palette").classList.remove("show"); else openPalette();
+    return;
+  }
+  if (e.key !== "Escape") return;
+  for (const id of ["palette", "dlgBox", "filesBox", "stepsBox", "adminBox"]) {
+    if ($(id).classList.contains("show")) { $(id).classList.remove("show"); return; }
+  }
+  $("skillPop").hidden = true; $("userMenu").hidden = true;
+});
 
 // ---------- 事件绑定 ----------
 
 $("newBtn").onclick = () => { resetComposer(); openSession(null); };
-$("menuBtn").onclick = () => $("side").classList.toggle("open");
+$("menuBtn").onclick = e => { e.stopPropagation(); $("side").classList.toggle("open"); };
+document.addEventListener("click", e => { if ($("side").classList.contains("open") && !e.target.closest("#side")) $("side").classList.remove("open"); });
 $("sendBtn").onclick = send;
-$("stopBtn").onclick = () => current && post(`/api/sessions/${current}/stop`);
+$("stopBtn").onclick = () => current && post(`/api/sessions/${current}/stop`).then(() => toast("已发送停止指令"));
 $("stepsBtn").onclick = showSteps;
 $("filesBtn").onclick = () => showFiles();
+$("paletteBtn").onclick = openPalette;
 $("refBtn").onclick = () => showFiles();
 $("wdBtn").onclick = () => showFiles(currentSess ? currentSess.work_dir : (composer.workDir || ""), "workdir");
 $("bypass").onchange = async () => {
@@ -845,7 +1152,7 @@ $("bypass").onchange = async () => {
     $("bypass").checked = false; return;
   }
   try { await post("/api/sessions/" + current, { bypass: on }, "PATCH"); }
-  catch (e) { alert(e.message); renderTop(); }
+  catch (e) { toast(e.message, "err"); renderTop(); }
 };
 $("input").addEventListener("input", e => {
   autosize();
@@ -857,17 +1164,15 @@ $("input").addEventListener("input", e => {
 $("input").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
-$("list").onclick = e => {
-  const id = e.target.dataset.allow || e.target.dataset.deny;
-  if (!id) return;
-  e.target.closest(".approval").querySelectorAll("button").forEach(b => b.disabled = true);
-  post("/api/approvals/" + id, { allow: !!e.target.dataset.allow }).catch(err => alert(err.message));
-};
 $("sessions").onclick = async e => {
-  const del = e.target.dataset.del;
+  const del = e.target.closest("[data-del]");
   if (del) {
     e.stopPropagation();
-    if (confirm("删除这个会话、聊天记录和上传到工作区的文件？")) api("/api/sessions/" + del, { method: "DELETE" }).catch(err => alert(err.message));
+    if (confirm("删除这个会话、聊天记录和上传到工作区的文件？")) {
+      const row = del.closest(".sess");
+      row.animate([{ opacity: 1 }, { opacity: 0, transform: "translateX(-20px)" }], { duration: 220, fill: "forwards" });
+      api("/api/sessions/" + del.dataset.del, { method: "DELETE" }).catch(err => toast(err.message, "err"));
+    }
     return;
   }
   const row = e.target.closest(".sess");
