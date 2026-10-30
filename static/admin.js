@@ -3,7 +3,7 @@
 (() => {
   let tab = "users";
   let users = [];
-  const roleName = { admin: "管理员", user: "普通用户", device: "板子（语音）" };
+  const roleName = { admin: "管理员", user: "普通用户" };
   const box = () => $("adminContent");
 
   async function loadUsers() { users = await api("/api/admin/users"); return users; }
@@ -27,6 +27,8 @@
       else if (t === "library") await renderLibrary();
       else if (t === "settings") await renderSettings();
       else if (t === "files") await renderFileOps();
+      else if (t === "usage") await renderUsage();
+      else if (t === "sections") await renderSections();
       else await renderReview();
     } catch (e) { box().innerHTML = `<div class="err">${esc(e.message)}</div>`; }
     refreshPending();
@@ -37,7 +39,7 @@
   async function renderUsers() {
     const [all, subs] = await Promise.all([api("/api/admin/sessions"), refreshPending()]);
     const today = new Date(new Date().toDateString()) / 1000;
-    const people = users.filter(u => u.role !== "device");
+    const people = users;
     const stats = [
       ["users", "账号", people.length],
       ["chat", "今天的会话", all.filter(s => s.updated >= today).length],
@@ -59,14 +61,14 @@
       <table class="grid"><tr><th>用户</th><th>角色</th><th title="允许打开“完全放行”">完全放行</th><th>会话</th><th>最近登录</th><th>状态</th><th></th></tr>
       ${users.map((u, i) => `<tr data-uid="${u.id}" style="animation-delay:${i * 30}ms">
         <td><div class="ucell">${avatarEl(u.avatar, 34)}<div><a class="fpath" style="font-family:var(--f-body);font-size:14px" data-act="rename">${esc(u.display_name)}</a><div class="un">@${esc(u.username)}</div></div></div></td>
-        <td>${u.role === "device" ? `<span class="tag">${roleName.device}</span>` : `<select class="mini" data-act="role"><option value="user" ${u.role === "user" ? "selected" : ""}>普通用户</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>管理员</option></select>`}</td>
+        <td><select class="mini" data-act="role"><option value="user" ${u.role === "user" ? "selected" : ""}>普通用户</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>管理员</option></select></td>
         <td>${u.role === "user" ? `<label class="switch"><input type="checkbox" data-act="bypass" ${u.can_bypass ? "checked" : ""}><span class="sw"></span></label>` : u.role === "admin" ? `<span class="muted">${icon("check", 16)}</span>` : "—"}</td>
         <td>${u.sessions}</td>
         <td class="muted" style="font-size:13px">${u.last_seen ? ftime(u.last_seen) : "—"}</td>
-        <td>${u.role === "device" ? "" : `<label class="switch"><input type="checkbox" data-act="disabled" ${u.disabled ? "checked" : ""}><span class="sw"></span>停用</label>`}</td>
+        <td><label class="switch"><input type="checkbox" data-act="disabled" ${u.disabled ? "checked" : ""}><span class="sw"></span>停用</label></td>
         <td style="white-space:nowrap;text-align:right">
-          ${u.role === "device" ? `<button class="btn small ghost" data-act="ava">${icon("user", 14)}头像</button>` : `<button class="btn small ghost" data-act="reset">${icon("key", 14)}重置密码</button>`}
-          ${u.role === "device" || u.id === me.id ? "" : `<button class="btn small ghost danger" data-act="delete">${icon("trash", 14)}</button>`}</td>
+          <button class="btn small ghost" data-act="reset">${icon("key", 14)}重置密码</button>
+          ${u.id === me.id ? "" : `<button class="btn small ghost danger" data-act="delete">${icon("trash", 14)}</button>`}</td>
       </tr>`).join("")}</table>`;
     box().querySelectorAll("[data-count]").forEach(el => countUp(el, +el.dataset.count));
     $("nuBtn").onclick = async () => {
@@ -308,6 +310,114 @@
     box().querySelectorAll("[data-reset]").forEach(b => b.onclick = () => {
       const key = b.dataset.reset;
       if (confirm("恢复成默认名单？")) save({ [key]: key === "ask_cmds" ? st.default_ask : st.default_allow });
+    });
+  }
+
+  // ---------- 用量 ----------
+
+  function adminDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+  function adminUsageQuery(range) {
+    if (range === "all") return "all=true";
+    if (range === "last") {
+      const now = new Date();
+      const s = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const e = new Date(now.getFullYear(), now.getMonth(), 0);
+      return `from=${adminDate(s)}&to=${adminDate(e)}`;
+    }
+    return "";
+  }
+  const adminCost = v => v === null || v === undefined ? "未采集费用" : (Number(v) === 0 ? "0（估算）" : `$${Number(v).toFixed(4)}（估算）`);
+  const adminTok = v => (v === null || v === undefined ? "—" : Number(v).toLocaleString("zh-CN"));
+
+  async function renderUsage() {
+    box().innerHTML = `<div class="seg" id="auTabs"><button data-aur="month" class="on">本月</button><button data-aur="last">上月</button><button data-aur="all">全部</button><span class="sp"></span><button class="btn small" id="auCsv">导出 CSV</button></div><div id="auBody"><div class="empty-note">读取中…</div></div>`;
+    let last = null;
+    const load = async range => {
+      $("auTabs").querySelectorAll("button[data-aur]").forEach(b => b.classList.toggle("on", b.dataset.aur === range));
+      $("auBody").innerHTML = `<div class="empty-note">读取中…</div>`;
+      try {
+        const qs = adminUsageQuery(range);
+        last = await api("/api/admin/usage" + (qs ? "?" + qs : ""));
+        if (!last.has_data) { $("auBody").innerHTML = `<div class="empty-note">还没有采集到用量</div>`; return; }
+        const t = last.total || {};
+        const rows = (last.by_user || []).map(u => `<tr><td>${esc(u.display_name || ("#" + u.user_id))}</td><td>${adminTok(u.input)}</td><td>${adminTok(u.output)}</td><td>${adminTok(u.turns)}</td><td>${adminCost(u.cost)}</td></tr>`).join("");
+        $("auBody").innerHTML = `<div class="stats">${[["输入", t.input], ["输出", t.output], ["缓存读", t.cache_read], ["轮次", t.turns], ["费用", adminCost(t.cost)]].map(([k, v]) =>
+          `<div class="stat"><div class="v">${esc(v ?? "—")}</div><div class="l">${k}</div></div>`).join("")}</div>
+          <table class="grid"><tr><th>用户</th><th>输入</th><th>输出</th><th>轮次</th><th>费用</th></tr>${rows || `<tr><td colspan="5" class="muted">区间内没有数据</td></tr>`}</table>`;
+      } catch (e) { $("auBody").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    };
+    $("auTabs").onclick = e => { const b = e.target.closest("[data-aur]"); if (b) load(b.dataset.aur); };
+    $("auCsv").onclick = () => {
+      if (!last || !last.by_user) return toast("没有可导出的数据", "err");
+      const head = ["用户", "输入", "输出", "缓存读", "轮次", "费用"];
+      const lines = [head].concat(last.by_user.map(u => [u.display_name || ("#" + u.user_id), u.input ?? 0, u.output ?? 0, u.cache_read ?? 0, u.turns ?? 0, u.cost ?? ""]));
+      const csv = lines.map(r => r.map(x => `"${String(x).replaceAll('"', '""')}"`).join(",")).join("\r\n");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
+      a.download = "usage.csv"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    };
+    load("month");
+  }
+
+  // ---------- 分区 ----------
+
+  async function renderSections() {
+    let list = [];
+    try {
+      const d = await api("/api/sections?include_archived=1");
+      list = Array.isArray(d) ? d : (d && d.sections) || [];
+    } catch (e) {
+      box().innerHTML = `<div class="err">${esc(e.message)}</div>`;
+      return;
+    }
+    box().innerHTML = `<div class="card"><h4>${icon("plus", 16)}新建分区</h4>
+      <div style="display:flex;gap:8px;margin-top:8px"><input class="field" id="nsName" placeholder="分区名，例如：合同" style="width:240px"><button class="btn primary" id="nsAdd">新建</button><button class="btn" id="nsSeed">一键建常用分区</button></div>
+      <div class="muted" style="font-size:12.5px;margin-top:6px">分区是分类，不是权限；归档后同名分区需要先恢复。</div></div>
+      <table class="grid"><tr><th>分区</th><th>我的会话</th><th>笔记</th><th>状态</th><th></th></tr>
+      ${list.map(s => `<tr data-sid="${s.id}"><td>${esc(s.name)}</td><td>${s.session_count ?? "—"}</td><td>${s.note_count ?? "—"}</td><td>${s.archived ? "已下架" : "使用中"}</td>
+        <td style="white-space:nowrap;text-align:right">
+          <button class="btn small ghost" data-sact="rename">改名</button>
+          <button class="btn small ghost" data-sact="${s.archived ? "restore" : "archive"}">${s.archived ? "恢复" : "下架"}</button>
+        </td></tr>`).join("") || `<tr><td colspan="5" class="muted">还没有分区</td></tr>`}</table>`;
+    const refresh = () => renderSections();
+    $("nsAdd").onclick = async () => {
+      const name = $("nsName").value.trim();
+      if (!name) return toast("请写分区名", "err");
+      try { await post("/api/sections", { name }); toast("已新建分区", "ok"); refresh(); }
+      catch (e) { toast(e.message, "err"); }
+    };
+    $("nsSeed").onclick = async () => {
+      const names = ["合同", "采购", "报表", "人事", "综合事务", "其他"];
+      let ok = 0, skip = 0, need = 0;
+      for (const name of names) {
+        try { await post("/api/sections", { name }); ok++; }
+        catch (e) {
+          if (/已归档|恢复/.test(e.message)) need++;
+          else if (/已经|存在|重名/.test(e.message)) skip++;
+          else toast(`${name}：${e.message}`, "err");
+        }
+      }
+      toast(`建成 ${ok} 个，跳过 ${skip} 个，${need} 个需先恢复`, "ok", 4000); refresh();
+    };
+    box().querySelectorAll("[data-sid]").forEach(tr => {
+      const id = Number(tr.dataset.sid);
+      const s = list.find(x => Number(x.id) === id);
+      tr.querySelector("[data-sact=rename]").onclick = async () => {
+        const name = prompt("新的分区名", s.name);
+        if (!name || name === s.name) return;
+        if (!confirm(`改名会同步更新 ${s.note_count ?? 0} 条笔记的 section 属性，确定吗？`)) return;
+        try { await post(`/api/sections/${id}`, { name: name.trim() }, "PATCH"); toast("已改名", "ok"); refresh(); }
+        catch (e) { toast(e.message, "err"); }
+      };
+      tr.querySelector("[data-sact=archive]")?.addEventListener("click", async () => {
+        if (!confirm(`下架“${s.name}”？老会话和老笔记仍显示原名，但新建时选不到。`)) return;
+        try { await post(`/api/sections/${id}`, { archived: 1 }, "PATCH"); toast("已下架", "ok"); refresh(); }
+        catch (e) { toast(e.message, "err"); }
+      });
+      tr.querySelector("[data-sact=restore]")?.addEventListener("click", async () => {
+        try { await post(`/api/sections/${id}`, { archived: 0 }, "PATCH"); toast("已恢复", "ok"); refresh(); }
+        catch (e) { toast(e.message, "err"); }
+      });
     });
   }
 

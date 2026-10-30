@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Projector · Claude 工作台</title>
+<title>Projector · 综合部工作台</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/png" href="/static/favicon.png">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
@@ -13,29 +13,26 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Projector">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-<script src="/static/ui.js?v=0.6.0"></script>
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script src="/static/ui.js?v=0.7.0"></script>
 <style>
 /* ============ 主题：暖纸色（浅色）/ 台灯夜色（深色） ============ */
 :root {
-  --bg: #f4efe6; --bg2: #ebe3d5; --surface: rgba(255, 253, 248, .78); --solid: #fffdf8; --raised: #ffffff;
-  --ink: #201b15; --ink2: #51483d; --muted: #8c8477; --faint: #b3ab9e;
-  --line: rgba(70, 50, 25, .10); --line2: rgba(70, 50, 25, .18);
-  --accent: #e8692e; --accent2: #c24f1c; --accent-soft: rgba(232, 105, 46, .11); --accent-ink: #fff;
-  --amber: #e9972a; --amber-soft: rgba(233, 151, 42, .13); --sage: #4f8a55; --rose: #c2412f; --rose-soft: rgba(194, 65, 47, .09);
+  --bg: #EFE6CF; --bg2: #E7DCC0; --surface: #E7DCC0; --solid: #F7EFDC; --raised: #F7EFDC;
+  --ink: #22303F; --ink2: #4A5867; --muted: #7E7A6B; --faint: #A39D8B;
+  --line: rgba(34, 48, 63, .16); --line2: rgba(34, 48, 63, .32);
+  --accent: #1B2A41; --accent2: #142034; --accent-soft: rgba(27, 42, 65, .08); --accent-ink: #F7EFDC;
+  --amber: #B8892F; --amber-soft: rgba(184, 137, 47, .14); --sage: #2E6B66; --rose: #D14B36; --rose-soft: rgba(209, 75, 54, .10);
   --info: #3d6aa8; --info-soft: rgba(61, 106, 168, .10);
   --code: rgba(70, 50, 25, .055);
   --shadow: 0 1px 2px rgba(50, 30, 10, .05), 0 6px 20px -8px rgba(50, 30, 10, .14);
   --shadow-lg: 0 30px 80px -24px rgba(50, 30, 10, .35), 0 2px 6px rgba(50, 30, 10, .06);
   --blob1: #ffb37a; --blob2: #ffd98a; --blob3: #f6a3a0; --grain: .05;
-  --f-display: "Instrument Serif", "Noto Serif SC", serif;
-  --f-serif-cn: "Noto Serif SC", "Songti SC", serif;
-  --f-body: "Figtree", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
-  --f-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --f-display: "Songti SC", "STSong", "SimSun", serif;
+  --f-serif-cn: "Songti SC", "STSong", "SimSun", serif;
+  --f-body: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --f-mono: Consolas, "Courier New", monospace;
   --ease: cubic-bezier(.2, .8, .2, 1); --spring: cubic-bezier(.34, 1.56, .64, 1);
   --r: 14px; --side-w: 280px;
   color-scheme: light;
@@ -823,64 +820,130 @@ a.wl.ghost::before { background: none; border: 1px dashed var(--faint); width: 4
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 </style>
+<link rel="stylesheet" href="/static/almanac.css?v=0.7.0">
 </head>
 <body>
-<div class="atmos"><i></i><i></i><i></i></div>
-
-<div class="app">
-  <aside id="side">
-    <div class="brand" id="brand"></div>
-    <button class="newbtn" id="newBtn"></button>
-    <label class="sq"><span id="sqIcon"></span><input id="sessQ" placeholder="搜索会话"><kbd id="kbdK">⌘K</kbd></label>
-    <button class="sidelink" id="kbNav"><span id="kbNavIcon"></span><span class="sl-t">知识库</span><span class="sl-c" id="kbCnt"></span></button>
-    <nav id="sessions"></nav>
-    <div class="mecard" id="userCard">
-      <span id="meAva"></span>
-      <div style="flex:1;min-width:0"><div class="nm" id="me"></div><div class="rl" id="roleTag"></div></div>
-      <span id="meChev"></span>
-      <div class="menu" id="userMenu" hidden></div>
+<div class="app" id="shell">
+  <aside class="rail">
+    <button class="rail-menu" id="menuBtn" aria-label="打开目录"></button>
+    <div class="vert">综合部工作台</div>
+    <div class="mono" id="railMono"></div>
+  </aside>
+  <aside class="logbook" id="side">
+    <div class="lb-head">
+      <div class="lb-kicker"><span>值班目录</span><b id="todayCount">00</b></div>
+      <button class="lb-new" id="newBtn"></button>
+    </div>
+    <label class="lb-search">
+      <span id="sqIcon"></span>
+      <input id="sessQ" placeholder="搜索会话">
+      <kbd id="kbdK">Ctrl K</kbd>
+    </label>
+    <div class="lb-section" id="sectionBar">
+      <button class="lb-section-btn" id="sectionBtn" type="button">分区 · <b id="sectionLabel">全部</b></button>
+      <div class="section-pop" id="sectionPop" hidden></div>
+    </div>
+    <div class="lb-scroll" id="sessions"></div>
+    <div class="lb-foot">
+      <button class="lb-link on" id="homeNav" type="button">值班板</button>
+      <button class="lb-link" id="filesBtn" type="button">文件库</button>
+      <button class="lb-link" id="kbNav" type="button"><span id="kbNavIcon"></span><span>知识库</span><span class="c" id="kbCnt"></span></button>
+      <div class="lb-user" id="userCard">
+        <span id="meAva"></span>
+        <div style="flex:1;min-width:0"><div class="nm" id="me"></div><div class="rl" id="roleTag"></div></div>
+        <span id="meChev"></span>
+        <div class="menu" id="userMenu" hidden></div>
+      </div>
     </div>
   </aside>
-  <main>
-    <header class="top">
-      <button class="iconbtn" id="menuBtn"></button>
-      <div class="tt">
-        <div class="title" id="title" title="双击重命名">新会话</div>
-        <div class="tsub"><button class="pill" id="wdBtn"></button><span id="ownerTag"></span></div>
-      </div>
-      <div class="tact">
-        <label class="switch" id="bypassWrap" title="打开后本会话的所有操作（包括删除、运行命令）都不再询问">
-          <input type="checkbox" id="bypass"><span class="sw"></span><span>完全放行</span>
-        </label>
-        <span class="conn" id="conn"></span>
-        <button class="iconbtn" id="kbBtn" data-tip="知识库"></button>
-        <button class="iconbtn" id="filesBtn" data-tip="文件库"></button>
-        <button class="iconbtn" id="stepsBtn" data-tip="完整过程"></button>
-        <button class="iconbtn" id="paletteBtn" data-tip="命令面板"></button>
-      </div>
-    </header>
-    <div class="banner view" id="otherBanner" hidden></div>
-    <div class="banner links" id="linksBar" hidden></div>
-    <div id="messages"><div class="inner" id="list"></div></div>
-    <div class="composer" id="composer">
-      <div class="askdock" id="askDock" hidden></div>
-      <div class="cbox" id="cbox">
-        <div class="chips" id="composerChips"></div>
-        <textarea id="input" rows="1" placeholder="让 Claude 干点活……"></textarea>
-        <div class="cbar">
-          <button class="tbtn" id="refBtn" title="从文件库选文件或文件夹（也可以打 @）"></button>
-          <button class="tbtn" id="localBtn" title="把这台电脑上的文件交给 Claude"></button>
-          <span class="anchor"><button class="tbtn" id="skillBtn"></button><div class="pop" id="skillPop" hidden></div></span>
-          <span class="sp"></span>
-          <span class="hint">Enter 发送 · Shift+Enter 换行 · @ 引用</span>
-          <button class="round stop" id="stopBtn" hidden title="停止"></button>
-          <button class="round send" id="sendBtn" title="发送"></button>
+  <div class="scrim" id="scrim"></div>
+  <main class="stage">
+    <section class="board" id="homeBoard">
+      <header class="masthead">
+        <div class="headcopy">
+          <div class="kicker">Projector · 综合部工作台</div>
+          <h1 id="dutyTitle">今天没有待确认</h1>
+          <p class="sub" id="dutySub">待确认的操作会出现在第一列。</p>
         </div>
+        <div class="meta">
+          <table>
+            <tr><th>日期</th><td id="metaDate"></td></tr>
+            <tr><th>值守</th><td id="metaWho">—</td></tr>
+            <tr><th>服务器</th><td id="metaHost"></td></tr>
+            <tr><th>工作目录</th><td id="metaDir">—</td></tr>
+            <tr><th>状态</th><td id="metaConn">—</td></tr>
+            <tr><th>输入</th><td id="metaInput">尚未入账</td></tr>
+            <tr><th>输出</th><td id="metaOutput">尚未入账</td></tr>
+            <tr><th>缓存</th><td id="metaCache">尚未入账</td></tr>
+            <tr><th>轮次</th><td id="metaTurns">尚未入账</td></tr>
+            <tr><th>费用</th><td id="metaCost">尚未入账</td></tr>
+          </table>
+        </div>
+      </header>
+      <div class="cols">
+        <section>
+          <div class="sec-h"><span class="n">01</span><span class="t">待处理</span></div>
+          <div id="colPending"><div class="board-empty">没有待确认的操作</div></div>
+        </section>
+        <section class="col-today">
+          <div class="sec-h"><span class="n">02</span><span class="t">今日会话</span></div>
+          <div id="colToday"><div class="board-empty">今天还没有会话</div></div>
+        </section>
+        <section>
+          <div class="sec-h"><span class="n">03</span><span class="t">今日知识库</span></div>
+          <div id="colKb"><div class="board-empty">今天还没有新增知识库内容</div></div>
+        </section>
       </div>
-      <div class="cfoot" id="cfoot">Claude 在台式机上干活，重要的改动请再核对一遍</div>
-      <input type="file" id="uploadInput" multiple hidden>
-      <input type="file" id="uploadDirInput" webkitdirectory hidden>
-    </div>
+    </section>
+    <section class="chat-stage" id="chatStage" hidden>
+      <header class="chat-head">
+        <div class="chat-top">
+          <div>
+            <div class="crumb">记录</div>
+            <h2 id="title" title="双击重命名">新会话</h2>
+          </div>
+          <div class="chat-meta">
+            <p><span>工作目录</span><b><button class="meta-link" id="wdBtn" type="button">—</button></b></p>
+            <p><span>分区</span><b><button class="meta-link" id="sessSection" type="button">—</button></b></p>
+            <p><span>会话状态</span><b id="sessState">—</b></p>
+            <p><span>消息</span><b id="msgCount">—</b></p>
+            <p><span>权限</span><b id="permLabel">标准 · 需确认</b></p>
+          </div>
+        </div>
+        <div class="chat-acts">
+          <span id="ownerTag" hidden></span>
+          <label class="switch" id="bypassWrap" title="打开后本会话的所有操作（包括删除、运行命令）都不再询问">
+            <input type="checkbox" id="bypass"><span class="sw"></span><span>完全放行</span>
+          </label>
+          <span class="conn" id="conn"></span>
+          <button class="meta-link" id="stepsBtn" type="button">步骤记录</button>
+          <button class="meta-link" id="paletteBtn" type="button">命令</button>
+          <button id="kbBtn" hidden type="button"></button>
+        </div>
+      </header>
+      <div class="banner view" id="otherBanner" hidden></div>
+      <div class="banner links" id="linksBar" hidden></div>
+      <div id="messages"><div class="inner" id="list"><div class="entry-empty">还没有记录。写下要交给 Claude 的事，发送后从这里开始。</div></div></div>
+      <div class="composer" id="composer">
+        <div class="askdock" id="askDock" hidden></div>
+        <div class="cbox" id="cbox">
+          <div class="chips" id="composerChips"></div>
+          <textarea id="input" rows="1" placeholder="写下要交给 Claude 的事"></textarea>
+          <div class="cbar">
+            <button class="tbtn" id="refBtn" title="从文件库选文件或文件夹（也可以打 @）" type="button"></button>
+            <button class="tbtn" id="localBtn" title="把这台电脑上的文件交给 Claude" type="button"></button>
+            <span class="anchor"><button class="tbtn" id="skillBtn" type="button"></button><div class="pop" id="skillPop" hidden></div></span>
+            <span class="sp"></span>
+            <span class="hint">Enter 发送 · Shift+Enter 换行</span>
+            <button class="round stop" id="stopBtn" hidden title="停止" type="button"></button>
+            <button class="round send" id="sendBtn" title="发送" type="button"></button>
+          </div>
+        </div>
+        <div class="cfoot" id="cfoot">Claude 在台式机上干活，重要的改动请再核对一遍</div>
+        <input type="file" id="uploadInput" multiple hidden>
+        <input type="file" id="uploadDirInput" webkitdirectory hidden>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -933,7 +996,7 @@ a.wl.ghost::before { background: none; border: 1px dashed var(--faint); width: 4
   <header><strong>管理后台</strong>
     <span class="seg" id="adminTabs">
       <button data-tab="users" class="on">用户</button><button data-tab="chats">聊天记录</button>
-      <button data-tab="library">技能库</button><button data-tab="review">待审核 <span id="pendingCount"></span></button><button data-tab="files">文件记录</button><button data-tab="settings">设置</button>
+      <button data-tab="library">技能库</button><button data-tab="review">待审核 <span id="pendingCount"></span></button><button data-tab="files">文件记录</button><button data-tab="usage">用量</button><button data-tab="sections">分区</button><button data-tab="settings">设置</button>
     </span>
     <button class="iconbtn closebtn" data-close></button>
   </header>
@@ -944,6 +1007,7 @@ a.wl.ghost::before { background: none; border: 1px dashed var(--faint); width: 4
   <header class="kbhead">
     <strong class="kbbrand"><span id="kbLogo"></span><span>知识库</span></strong>
     <span class="seg" id="kbTabs"><button data-kt="home" class="on">首页</button><button data-kt="notes">笔记</button><button data-kt="graph">关系图谱</button></span>
+    <div class="kbsecs" id="kbSections"></div>
     <label class="kbq"><span id="kbQIcon"></span><input id="kbQ" placeholder="搜索经验、文件卡片、主题…"></label>
     <button class="btn small primary" id="kbNew"></button>
     <button class="iconbtn closebtn" id="kbClose"></button>
@@ -975,9 +1039,8 @@ a.wl.ghost::before { background: none; border: 1px dashed var(--faint); width: 4
 
 <div class="overlay" id="login"><div class="auth">
   <section class="hero">
-    <div class="orbit" id="orbit"></div>
-    <h1>Projector</h1>
-    <p>让台式机上的 Claude，<b>替整个团队干活</b>。</p>
+    <div class="vert-title">综合部工作台</div>
+    <div class="seal2">值班</div>
   </section>
   <section class="authside">
     <form id="loginForm" class="form">
@@ -999,8 +1062,8 @@ a.wl.ghost::before { background: none; border: 1px dashed var(--faint); width: 4
   </section>
 </div></div>
 
-<script src="/static/app.js?v=0.6.0"></script>
-<script src="/static/admin.js?v=0.6.0"></script>
-<script src="/static/kb.js?v=0.6.0"></script>
+<script src="/static/app.js?v=0.7.0"></script>
+<script src="/static/admin.js?v=0.7.0"></script>
+<script src="/static/kb.js?v=0.7.0"></script>
 </body>
 </html>

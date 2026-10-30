@@ -1,7 +1,7 @@
 //! Claude 工作台桌面壳子：窗口里直接加载中心服务的网页端，外加托盘和“服务端模式”。
 //!
 //! 服务端模式（只在台式机上打开）：开机自启，后台无窗口运行
-//! `python server.py` 和 `python mcp_pipe.py claude_mcp.py`，进程退出后自动重启。
+//! `python server.py`，进程退出后自动重启。
 //! 环境变量从项目文件夹里的 config.bat 的 set 行读取。
 
 use std::{
@@ -47,7 +47,7 @@ struct Proc {
     label: &'static str,
     log_name: &'static str,
     args: &'static [&'static str],
-    /// 启用后延迟多久再启动（小智连接等中心服务先起来）
+    /// 启用后延迟多久再启动
     delay: Duration,
     child: Option<Child>,
     started_at: Instant,
@@ -223,7 +223,7 @@ fn spawn_proc(app: &AppHandle, cfg: &Config, p: &Proc) -> std::io::Result<Child>
     cmd.spawn()
 }
 
-/// 结束进程及其子进程（mcp_pipe.py 会再起一个 claude_mcp.py）
+/// 结束进程及其子进程
 fn kill_tree(mut child: Child) {
     #[cfg(windows)]
     {
@@ -818,7 +818,6 @@ pub fn run() {
             setup_url: Mutex::new(None),
             procs: Mutex::new(vec![
                 Proc::new("中心服务", "server.log", &["server.py"], Duration::ZERO),
-                Proc::new("小智连接", "mcp_pipe.log", &["mcp_pipe.py", "claude_mcp.py"], Duration::from_secs(3)),
             ]),
             tray: Mutex::new(None),
             quitting: AtomicBool::new(false),

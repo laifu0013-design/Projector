@@ -1,4 +1,4 @@
-"""台式机中心服务：账号、多会话、权限确认、调用 Claude Code；供局域网网页端、桌面软件和小智语音共同使用。
+"""台式机中心服务：账号、多会话、权限确认、调用 Claude Code；供局域网网页端和桌面软件使用。
 
 运行：python server.py              （配置见 config.bat 里的环境变量）
 重置密码：python server.py reset-password 用户名 新密码
@@ -27,7 +27,7 @@ import kb
 import skills_api
 from store import (AVATARS, BASE, CLAUDE_HOME, DATA, DISCOVERY_PORT, FILE_ROOT, INTERNAL_TOKEN, KB_ROOT, PORT, TRASH, WS_ROOT,
                    user_ws_dir,
-                   adopt_orphans, avatar_of, get_setting, set_setting, board_user, check_password, current_user, db, find_claude, first_admin,
+                   adopt_orphans, avatar_of, get_setting, set_setting, check_password, current_user, db, find_claude, first_admin,
                    get_user, hash_password, is_admin, is_local, issue_token, jdump, posix_rule_path,
                    require_admin, require_internal, session_for, session_workspace, user_public)
 
@@ -94,15 +94,6 @@ WEB_HINT = (
     "这台电脑是 Windows，命令通过 Git Bash 执行：python 不能用时试 py；没有 unzip 时用 tar -xf 文件.zip 或 "
     "powershell -Command \"Expand-Archive 文件.zip 目标文件夹\"；文件路径用正斜杠或加引号。"
 )
-VOICE_HINT = (
-    "用户是通过一块 2 寸小屏幕的语音助手给你下指令的，指令经过语音识别和另一个助手转述，可能有错字。"
-    "你的最终回答会显示在小屏幕上并被朗读：用中文给出 150 字以内的结论，"
-    "不要用 Markdown 表格、代码块或长列表。较长的内容写进文件，只告诉用户路径。"
-    "修改文件和执行命令需要用户口头确认，尽量把需要确认的操作合并成一次；被拒绝时不要重试同样的操作。"
-    "团队知识库（{kb}）里有以前的经验和重要文件的卡片，涉及公司业务或找资料时先用 kb_search 查。"
-    "读 Word、Excel、PPT、PDF 用 read_document。"
-)
-
 # 聊天里的两个快捷动作：给 Claude 的完整指令；用户看到的是简短的一句
 KB_ACTIONS = {
     "distill": (
@@ -154,12 +145,12 @@ def push_session(sid: str) -> None:
         broadcast({"type": "session", "session": session_view(s)}, s["user_id"])
 
 
-def create_session(title: str, source: str, owner: dict, work_dir: str | None = None) -> dict:
+def create_session(title: str, owner: dict, work_dir: str | None = None) -> dict:
     now = time.time()
     sid = uuid.uuid4().hex[:12]
     db("INSERT INTO sessions (id, title, source, claude_session, created, updated, bypass, created_by, user_id, work_dir) "
        "VALUES (?,?,?,?,?,?,0,?,?,?)",
-       (sid, title, source, None, now, now, owner["display_name"], owner["id"], work_dir))
+       (sid, title, "web", None, now, now, owner["display_name"], owner["id"], work_dir))
     push_session(sid)
     return db("SELECT * FROM sessions WHERE id=?", (sid,), one=True)
 
@@ -254,7 +245,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 def _hint_file(sess: dict, owner: dict) -> Path:
-    hint = (VOICE_HINT if sess["source"] == "voice" else WEB_HINT).format(user=owner["display_name"], kb=KB_ROOT)
+    hint = WEB_HINT.format(user=owner["display_name"], kb=KB_ROOT)
     path = DATA / "mcp" / f"hint_{sess['id']}.txt"
     path.write_text(hint, encoding="utf-8")
     return path
@@ -300,11 +291,11 @@ def build_command(claude_bin: str, sess: dict, owner: dict, extra_dirs: list[Pat
         },
     }}}), encoding="utf-8")
     cmd += ["--mcp-config", str(mcp_config)]
-    if sess["bypass"] and can_bypass(owner) and sess["source"] != "voice":
+    if sess["bypass"] and can_bypass(owner):
         cmd += ["--permission-mode", "bypassPermissions"]
     elif perm_mode() == "strict":
-        # 严格：只读命令 + 白名单自动放行；语音会话改文件也要确认
-        auto = READ_TOOLS + SAFE_BASH + SKILL_TOOLS + bash_allow_rules() + ([] if sess["source"] == "voice" else EDIT_TOOLS)
+        # 严格：只读命令 + 白名单自动放行；改文件也要确认
+        auto = READ_TOOLS + SAFE_BASH + SKILL_TOOLS + bash_allow_rules() + EDIT_TOOLS
         cmd += ["--permission-prompt-tool", "mcp__center__approve", "--allowedTools", *auto]
     else:
         # 标准：读、改、运行命令都自动放行，只有危险命令走确认（ask 规则优先于 allow）
@@ -638,8 +629,6 @@ def admin_create_user(body: Credentials, admin: dict = Depends(require_admin)):
 @app.patch("/api/admin/users/{uid}")
 def admin_update_user(uid: int, body: UserPatch, admin: dict = Depends(require_admin)):
     u = _target_user(uid)
-    if u["role"] == "device" and (body.role or body.password or body.disabled):
-        raise HTTPException(400, "板子账号不能登录，只能改名字、头像和技能")
     if body.display_name is not None:
         db("UPDATE users SET display_name=? WHERE id=?", (body.display_name.strip()[:32] or u["username"], uid))
     if body.avatar is not None:
@@ -671,8 +660,8 @@ def admin_update_user(uid: int, body: UserPatch, admin: dict = Depends(require_a
 @app.delete("/api/admin/users/{uid}")
 def admin_delete_user(uid: int, admin: dict = Depends(require_admin)):
     u = _target_user(uid)
-    if u["role"] == "device" or uid == admin["id"]:
-        raise HTTPException(400, "不能删除板子账号或自己")
+    if uid == admin["id"]:
+        raise HTTPException(400, "不能删除自己")
     if any(r.owner_id == uid for r in RUNS.values()):
         raise HTTPException(409, "这个用户还有任务在进行")
     ud = user_ws_dir(u, create=False)  # 删账号记录之前先定位工作区
@@ -798,17 +787,6 @@ class Decision(BaseModel):
     allow: bool
 
 
-class VoiceTask(BaseModel):
-    task: str
-    continue_last: bool = False
-    wait: float = 40
-
-
-class VoiceConfirm(BaseModel):
-    allow: bool
-    wait: float = 40
-
-
 def _check_work_dir(path: str, user: dict) -> str:
     p = files_api.resolve_path(path, user)
     if not p.is_dir():
@@ -837,7 +815,7 @@ def list_sessions(user: dict = Depends(current_user)):
 @app.post("/api/sessions")
 def new_session(body: NewSession, user: dict = Depends(current_user)):
     work_dir = _check_work_dir(body.work_dir, user) if body.work_dir else None
-    return session_view(create_session(body.title.strip()[:40] or "新会话", "web", user, work_dir))
+    return session_view(create_session(body.title.strip()[:40] or "新会话", user, work_dir))
 
 
 @app.get("/api/sessions/{sid}")
@@ -864,8 +842,6 @@ def update_session(sid: str, body: UpdateSession, user: dict = Depends(current_u
     if body.title is not None:
         db("UPDATE sessions SET title=? WHERE id=?", (body.title.strip()[:40] or "未命名", sid))
     if body.bypass is not None:
-        if body.bypass and s["source"] == "voice":
-            raise HTTPException(400, "语音会话不能完全放行")
         if body.bypass and not can_bypass(user):
             raise HTTPException(403, "你没有“完全放行”的权限，请找管理员开通")
         db("UPDATE sessions SET bypass=? WHERE id=?", (int(body.bypass), sid))
@@ -973,7 +949,7 @@ def transcript(sid: str, user: dict = Depends(current_user)):
     return {"steps": steps}
 
 
-# 给 approval_mcp.py 用：挂起直到有人在网页或语音里做出决定
+# 给 approval_mcp.py 用：挂起直到有人在网页里做出决定
 @app.post("/api/approvals")
 async def request_approval(body: ApprovalRequest, _: dict = Depends(require_internal)):
     run = RUNS.get(body.session_id)
@@ -1035,11 +1011,8 @@ def _qa_text(questions: list[dict], answers: list[dict]) -> str:
 @app.post("/api/questions")
 async def ask_question(body: QuestionRequest, _: dict = Depends(require_internal)):
     run = RUNS.get(body.session_id)
-    sess = db("SELECT source FROM sessions WHERE id=?", (body.session_id,), one=True)
     if not run:
         return {"text": "任务已结束。"}
-    if sess and sess["source"] == "voice":
-        return {"text": "这是语音会话，不能弹出选项。请把问题和选项简短地写进回答里，让用户口头回复。"}
     questions = []
     for q in body.questions[:4]:
         opts = [{"label": str(o.get("label", "")).strip()[:80], "description": str(o.get("description", "")).strip()[:200]}
@@ -1118,68 +1091,6 @@ async def events(request: Request, user: dict = Depends(current_user)):
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-# ---------- 给小智 MCP 工具用（语音会话都归“板子”账号） ----------
-# 每个新话题开一个语音会话，追问时接着最近的语音会话
-
-def latest_voice_session() -> dict | None:
-    return db("SELECT * FROM sessions WHERE source='voice' ORDER BY updated DESC LIMIT 1", one=True)
-
-
-async def wait_voice(sid: str, timeout: float) -> dict:
-    """等到任务完成或出现待确认操作，最多等 timeout 秒。"""
-    end = time.time() + timeout
-    while True:
-        run = RUNS.get(sid)
-        pending = pending_for(sid)
-        if pending:
-            return {"status": "confirm",
-                    "reply": f"需要确认：{pending[0]['summary']}。请问用户是否同意，用户回答后调用 claude_confirm。"}
-        if not run:
-            msg = db("SELECT * FROM messages WHERE session_id=? AND role IN ('assistant','error') "
-                     "ORDER BY id DESC LIMIT 1", (sid,), one=True)
-            ok = bool(msg and msg["role"] == "assistant")
-            return {"status": "done" if ok else "failed", "reply": msg["content"] if msg else "没有结果。"}
-        if time.time() >= end:
-            tools = f"，已经做了 {len(run.tools)} 步操作" if run.tools else ""
-            return {"status": "running",
-                    "reply": f"任务还在进行{tools}，可能需要几分钟。稍后问我“任务进度”就能看到结果。"}
-        await asyncio.sleep(0.3)
-
-
-@app.post("/api/voice")
-async def voice_task(body: VoiceTask, _: dict = Depends(require_internal)):
-    task = body.task.strip()
-    last = latest_voice_session()
-    if last and last["id"] in RUNS:
-        state = await wait_voice(last["id"], 0)
-        if state["status"] == "running":
-            return {"status": "busy", "reply": "上一个语音任务还在进行，请等它完成后再下新任务。"}
-        return state  # 有操作在等确认，先把它告诉用户
-    board = board_user()
-    sess = last if (body.continue_last and last) else create_session("🎤 " + task[:18], "voice", board)
-    await start_turn(sess, task, board)
-    return await wait_voice(sess["id"], body.wait)
-
-
-@app.post("/api/voice/confirm")
-async def voice_confirm(body: VoiceConfirm, _: dict = Depends(require_internal)):
-    last = latest_voice_session()
-    pending = pending_for(last["id"]) if last else []
-    if not pending:
-        return {"status": "none", "reply": "现在没有等待确认的操作。"}
-    resolve_approval(pending[0]["id"], body.allow, "语音")
-    await asyncio.sleep(0.5)  # 给 Claude 一点时间继续，免得马上读到同一个状态
-    return await wait_voice(last["id"], body.wait)
-
-
-@app.get("/api/voice/status")
-async def voice_status(_: dict = Depends(require_internal)):
-    last = latest_voice_session()
-    if not last:
-        return {"status": "none", "reply": "还没有执行过语音任务。"}
-    return await wait_voice(last["id"], 0)
 
 
 # ---------- 局域网自动发现：桌面软件广播询问，这里回复自己的名字和端口 ----------

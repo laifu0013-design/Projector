@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: |
           git archive --format=zip --prefix=Projector-server/ -o "Projector-server-${GITHUB_REF_NAME}.zip" HEAD \
-            server.py store.py files_api.py skills_api.py kb.py approval_mcp.py claude_mcp.py mcp_pipe.py requirements.txt static \
+            server.py store.py files_api.py skills_api.py kb.py approval_mcp.py requirements.txt static \
             install.bat start.bat config.example.bat README.md
 
       - name: 发布 Release

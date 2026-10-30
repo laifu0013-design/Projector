@@ -44,16 +44,12 @@ if exist config.bat (
 ) else (
   echo.
   echo 下面填几项配置，直接回车用括号里的默认值。
-  echo 小智 MCP 接入点：xiaozhi.me 控制台 → 智能体 → 配置角色 → 右下角 "MCP 接入点"，复制完整地址。
-  set "EP="
-  set /p "EP=MCP 接入点地址（不用语音可留空）："
   set "WD="
   set /p "WD=Claude 的工作目录（D:\）："
   if "!WD!"=="" set "WD=D:\"
   > config.bat (
     echo @echo off
     echo rem 由 install.bat 生成，可以直接用记事本修改
-    echo set "MCP_ENDPOINT=!EP!"
     echo set "CENTER_PORT=8080"
     echo set "CLAUDE_WORK_DIR=!WD!"
     echo rem 用 DeepSeek 等第三方模型、且没有设成系统环境变量时，去掉下面几行开头的 rem 再填写

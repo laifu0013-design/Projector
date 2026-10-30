@@ -14,6 +14,9 @@ let token = store.get("token");
 let me = null;               // 当前用户
 let sessions = [];           // 自己的会话
 let current = null;          // 当前会话 id，null 表示还没发消息的新会话
+let viewMode = "home";       // home 值班板 / chat 会话页
+let sections = [];           // 分区列表（后端 /api/sections）
+let currentSection = null;   // null=全部，0=未分类，其他=section_id
 let currentSess = null;      // 当前会话对象（可能是别人的，管理员查看时）
 let messages = [];
 let live = null;             // 正在进行的回复 {text, tools}
@@ -96,14 +99,14 @@ function closeDialog() { $("dlgBox").classList.remove("show"); }
 // ---------- 静态图标 ----------
 
 function paintStatic() {
-  $("brand").innerHTML = `${orb(30)}<div><div class="b1">Projector</div><div class="b2">CLAUDE 工作台</div></div>`;
-  $("newBtn").innerHTML = icon("plus", 18) + "新会话";
+  if ($("brand")) $("brand").innerHTML = `${orb(30)}<div><div class="b1">Projector</div><div class="b2">CLAUDE 工作台</div></div>`;
+  $("newBtn").textContent = "＋ 新会话";
   $("sqIcon").innerHTML = icon("search", 15);
   $("kbdK").textContent = IS_MAC ? "⌘K" : "Ctrl K";
   $("menuBtn").innerHTML = icon("menu", 20);
-  $("filesBtn").innerHTML = icon("folder");
-  $("stepsBtn").innerHTML = icon("steps");
-  $("paletteBtn").innerHTML = icon("command");
+  if ($("filesBtn") && !$("filesBtn").classList.contains("lb-link")) $("filesBtn").innerHTML = icon("folder");
+  $("stepsBtn").innerHTML = icon("steps", 14) + " 步骤记录";
+  $("paletteBtn").innerHTML = icon("command", 14) + " 命令";
   $("meChev").innerHTML = icon("chevD", 16, "muted");
   $("refBtn").innerHTML = icon("clip", 16) + "<span>引用文件</span>";
   $("localBtn").innerHTML = icon("laptop", 16) + "<span>本机文件</span>";
@@ -131,7 +134,7 @@ function paintStatic() {
     const a = i / ids.length * Math.PI * 2;
     return `<span style="transform:translate(${Math.cos(a) * r - size / 2}px, ${Math.sin(a) * r - size / 2}px)">${avatarEl(id, size)}</span>`;
   }).join("")}</div>`;
-  $("orbit").innerHTML = ring(["orange", "grape", "kiwi", "peach", "blueberry", "pineapple", "lemon", "strawberry"], 190, "", 46)
+  if ($("orbit")) $("orbit").innerHTML = ring(["orange", "grape", "kiwi", "peach", "blueberry", "pineapple", "lemon", "strawberry"], 190, "", 46)
     + ring(["avocado", "cherry", "watermelon", "plum", "lime"], 120, "r2", 34) + orb(120);
 }
 paintStatic();
@@ -198,16 +201,87 @@ function enter(user) {
   me = user;
   paintMe();
   sessions = []; current = null; currentSess = null; messages = []; live = null; approvals = []; links = [];
+  sections = []; currentSection = null;
   seen.clear();
   resetComposer();
+  setView("home");
+  loadSections();
+  loadHomeUsage();
   connect();
-  loadSkills().then(() => { if (!messages.length && !live) renderMessages(true); });
+  loadSkills().then(() => { if (viewMode === "chat" && !messages.length && !live) renderMessages(true); });
   window.kbInit?.();
   renderSessions();
-  renderMessages();
+  renderHome();
 }
 
 // ---------- 用户菜单：头像、技能、管理、主题、密码、退出 ----------
+
+function localYmd(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+function usageQuery(range) {
+  if (range === "all") return "all=true";
+  if (range === "last") {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const end = new Date(now.getFullYear(), now.getMonth(), 0);
+    return `from=${localYmd(start)}&to=${localYmd(end)}`;
+  }
+  return "";
+}
+const fmtCost = v => v === null || v === undefined ? "未采集费用" : (Number(v) === 0 ? "0（估算）" : `$${Number(v).toFixed(4)}（估算）`);
+const fmtTok = v => (v === null || v === undefined ? "—" : Number(v).toLocaleString("zh-CN"));
+
+function usageHtml(d) {
+  if (!d || !d.has_data) return `<div class="board-empty">还没有采集到用量</div>`;
+  const t = d.total || {};
+  const models = (d.by_model || []).map(m => `<tr><td>${esc(m.model || "unknown")}</td><td>${fmtTok(m.input)}</td><td>${fmtTok(m.output)}</td><td>${fmtCost(m.cost)}</td></tr>`).join("");
+  const turns = (d.turns || []).map(x => `<tr><td>${esc(x.session_title || "")}</td><td>${esc(x.preview || "")}</td><td>${fmtTok(x.input)}</td><td>${fmtTok(x.output)}</td><td>${fmtCost(x.cost)}</td></tr>`).join("");
+  return `<div class="stats">${[["输入", t.input], ["输出", t.output], ["缓存读", t.cache_read], ["轮次", t.turns], ["费用", fmtCost(t.cost)]].map(([k, v]) =>
+    `<div class="stat"><div class="v">${esc(v ?? "—")}</div><div class="l">${k}</div></div>`).join("")}</div>
+    ${models ? `<h4>按模型</h4><table class="grid"><tr><th>模型</th><th>输入</th><th>输出</th><th>费用</th></tr>${models}</table>` : ""}
+    ${turns ? `<h4>最近轮次</h4><table class="grid"><tr><th>会话</th><th>内容</th><th>输入</th><th>输出</th><th>费用</th></tr>${turns}</table>` : ""}
+    <p class="muted" style="font-size:12px;margin-top:12px">token 是模型调用量，不等于套餐额度；费用为估算值；cache read 单价更低。</p>`;
+}
+
+async function loadUsage(body, range) {
+  const box = body.querySelector("#usageData");
+  if (!box) return;
+  box.innerHTML = `<div class="empty-note">读取中…</div>`;
+  try {
+    const qs = usageQuery(range);
+    const d = await api("/api/usage/me" + (qs ? "?" + qs : ""));
+    const tr = await api("/api/usage/me/turns?limit=20").catch(() => ({ turns: [] }));
+    d.turns = Array.isArray(tr) ? tr : (tr.turns || []);
+    box.innerHTML = usageHtml(d);
+  } catch (e) {
+    box.innerHTML = `<div class="board-empty">用量接口还没就绪：${esc(e.message)}</div>`;
+  }
+}
+
+function openUsage() {
+  const body = dialog("我的用量", `<div class="seg" id="usageTabs">
+    <button data-ur="month" class="on">本月</button><button data-ur="last">上月</button><button data-ur="all">全部</button>
+    </div><div id="usageData"></div>`, [], true);
+  const load = r => {
+    body.querySelectorAll("[data-ur]").forEach(b => b.classList.toggle("on", b.dataset.ur === r));
+    loadUsage(body, r);
+  };
+  body.querySelector("#usageTabs").onclick = e => { const b = e.target.closest("[data-ur]"); if (b) load(b.dataset.ur); };
+  load("month");
+}
+
+async function loadHomeUsage() {
+  const set = (id, v) => { if ($(id)) $(id).textContent = v; };
+  try {
+    const d = await api("/api/usage/me");
+    if (!d.has_data) return;
+    const t = d.total || {};
+    set("metaInput", fmtTok(t.input));
+    set("metaOutput", fmtTok(t.output));
+    set("metaCache", fmtTok(t.cache_read));
+    set("metaTurns", fmtTok(t.turns));
+    set("metaCost", fmtCost(t.cost));
+  } catch { /* 用量接口未就绪时保留“尚未入账” */ }
+}
 
 const THEMES = { auto: ["跟随系统", "sparkle"], light: ["浅色", "sun"], dark: ["深色", "moon"] };
 function renderUserMenu() {
@@ -215,6 +289,7 @@ function renderUserMenu() {
   $("userMenu").innerHTML = `
     <button data-act="avatar">${icon("user", 16)}更换头像</button>
     <button data-act="skills">${icon("puzzle", 16)}我的技能</button>
+    <button data-act="usage">${icon("steps", 16)}我的用量</button>
     <button data-act="mobile">${icon("phone", 16)}在手机上打开</button>
     ${me.role === "admin" ? `<button data-act="admin">${icon("shield", 16)}管理后台</button>` : ""}
     <hr>
@@ -231,6 +306,7 @@ $("userCard").onclick = e => {
   $("userMenu").hidden = true;
   if (act === "avatar") pickAvatar();
   if (act === "skills") loadSkills().then(openMySkills);
+  if (act === "usage") openUsage();
   if (act === "mobile") showMobile();
   if (act === "admin") window.openAdmin && window.openAdmin();
   if (act === "theme") {
@@ -284,37 +360,214 @@ async function logout() {
   showLogin();
 }
 
-// ---------- 会话列表 ----------
+// ---------- 分区 ----------
+
+function sectionName(id) {
+  if (id === null || id === undefined || id === "") return "全部";
+  if (Number(id) === 0) return "未分类";
+  const s = sections.find(x => Number(x.id) === Number(id));
+  return s ? s.name : "未分类";
+}
+
+function sessionSectionName(id) {
+  if (id === null || id === undefined || Number(id) === 0) return "未分类";
+  const s = sections.find(x => Number(x.id) === Number(id));
+  return s ? s.name : "未分类";
+}
+
+function sectionMatch(sectionId) {
+  if (currentSection === null) return true;
+  if (Number(currentSection) === 0) return sectionId === null || sectionId === undefined || Number(sectionId) === 0;
+  return Number(sectionId) === Number(currentSection);
+}
+
+async function loadSections() {
+  try {
+    const d = await api("/api/sections");
+    sections = Array.isArray(d) ? d : (d && d.sections) || [];
+  } catch { sections = []; }
+  if (currentSection !== null && currentSection !== 0 && !sections.some(s => Number(s.id) === Number(currentSection))) {
+    currentSection = null;
+  }
+  renderSectionBar();
+}
+
+function renderSectionBar() {
+  const label = $("sectionLabel");
+  if (label) label.textContent = sectionName(currentSection);
+  const pop = $("sectionPop");
+  if (!pop) return;
+  const item = (value, name, count) => `<button type="button" data-sid="${value}" class="${String(currentSection ?? "") === String(value) ? "on" : ""}"><span>${esc(name)}</span>${count != null ? `<small>${count}</small>` : ""}</button>`;
+  pop.innerHTML = item("", "全部", null) + item("0", "未分类", null) +
+    sections.filter(s => !s.archived).map(s => item(String(s.id), s.name, s.session_count)).join("");
+}
+
+function bindSectionBar() {
+  const btn = $("sectionBtn"), pop = $("sectionPop");
+  if (!btn || !pop) return;
+  btn.onclick = e => { e.stopPropagation(); pop.hidden = !pop.hidden; };
+  pop.onclick = e => {
+    const b = e.target.closest("[data-sid]");
+    if (!b) return;
+    currentSection = b.dataset.sid === "" ? null : Number(b.dataset.sid);
+    pop.hidden = true;
+    renderSectionBar();
+    loadSessions();
+  };
+  document.addEventListener("click", e => {
+    if (!pop.hidden && !e.target.closest("#sectionBar")) pop.hidden = true;
+  });
+}
+
+function sectionSelectHtml(selected, includeEmpty = true) {
+  const opts = [`<option value=""${!selected ? " selected" : ""}>未分类</option>`];
+  const active = sections.filter(s => !s.archived);
+  const known = active.some(s => s.name === selected);
+  if (selected && !known) opts.unshift(`<option value="${esc(selected)}" selected>${esc(selected)}（已下架）</option>`);
+  for (const s of active) opts.push(`<option value="${esc(s.name)}"${s.name === selected ? " selected" : ""}>${esc(s.name)}</option>`);
+  return opts.join("");
+}
+
+function fmtDuration(sec) {
+  if (sec === null || sec === undefined || Number.isNaN(Number(sec))) return "—";
+  sec = Math.max(0, Math.round(Number(sec)));
+  if (sec < 60) return sec + "s";
+  const m = Math.round(sec / 60);
+  if (m < 60) return m + "m";
+  return Math.floor(m / 60) + "h" + (m % 60 ? " " + (m % 60) + "m" : "");
+}
+
+function sessionSectionOptions(selected) {
+  const opts = [`<option value="0"${!selected ? " selected" : ""}>未分类</option>`];
+  const active = sections.filter(s => !s.archived);
+  if (selected && !active.some(s => Number(s.id) === Number(selected))) {
+    opts.push(`<option value="${selected}" selected>${esc(sessionSectionName(selected))}（已下架）</option>`);
+  }
+  for (const s of active) opts.push(`<option value="${s.id}"${Number(selected) === Number(s.id) ? " selected" : ""}>${esc(s.name)}</option>`);
+  return opts.join("");
+}
+
+async function pickSessionSection() {
+  if (!currentSess || !isMine()) return;
+  const body = dialog("设置会话分区", `<div class="form">
+    <select class="ke-section" id="sessSecSel">${sessionSectionOptions(currentSess.section_id)}</select>
+    <p class="muted" style="font-size:12px;margin:8px 0 0">只影响这个会话的筛选，不改变下次新建的默认分区。</p>
+  </div>`, [{ label: "取消" }, {
+    label: "保存", primary: true, onClick: async () => {
+      const val = Number($("sessSecSel").value || 0);
+      const r = await post(`/api/sessions/${current}`, { section_id: val }, "PATCH");
+      currentSess = r;
+      upsertSession(r);
+      renderTop();
+    },
+  }]);
+  return body;
+}
+
+function sessStatus(s) {
+  const map = { pending: ["待确认", "wait"], running: ["进行中", "run"], stopped: ["已停止", "off"], done: ["已完成", "done"] };
+  if (s && s.status && map[s.status]) return map[s.status];
+  if (s && s.pending) return ["待确认", "wait"];
+  if (s && s.running) return ["进行中", "run"];
+  if (s && !s.claude_session && !s.message_count) return ["未开始", "off"];
+  return ["已完成", "done"];
+}
 
 function sessRow(s, adminView = false) {
-  const lead = s.running ? orb(14, "busy") : s.pending ? '<span class="pend"></span>' : (s.source === "voice" ? icon("mic", 14) : icon("chat", 14));
-  return `<div class="sess ${s.id === current ? "active" : ""}" data-id="${s.id}" title="${esc(s.title)}">
-      <span class="lead">${lead}</span>
-      <span class="t">${esc(s.title)}</span>
-      ${s.pending ? '<span class="tag warn">待确认</span>' : ""}
-      <span class="tm">${adminView ? ftime(s.updated) : rel(s.updated)}</span>
+  const [label, cls] = sessStatus(s);
+  return `<div class="srow sess${s.id === current ? " on" : ""}" data-id="${s.id}" title="${esc(s.title)}">
+      <span class="tm">${adminView ? ftime(s.updated) : hm(s.updated)}</span>
+      <span><span class="ti">${esc(s.title)}</span><span class="st ${cls}">${label}</span></span>
       ${adminView ? "" : `<button class="x" data-del="${s.id}" title="删除">${icon("trash", 14)}</button>`}
     </div>`;
 }
 
 function renderSessions() {
   const q = $("sessQ").value.trim().toLowerCase();
-  const list = sessions.filter(s => !q || s.title.toLowerCase().includes(q));
+  const list = sessions.filter(s => sectionMatch(s.section_id) && (!q || s.title.toLowerCase().includes(q)));
+  const today = new Date(new Date().toDateString()) / 1000;
+  if ($("todayCount")) $("todayCount").textContent = pad(sessions.filter(s => sectionMatch(s.section_id) && s.updated >= today).length);
   if (!list.length) {
-    $("sessions").innerHTML = `<div class="empty-note" style="padding:20px 10px;text-align:center">${q ? "没有匹配的会话" : "还没有会话<br>在右边输入就能开始"}</div>`;
+    $("sessions").innerHTML = `<div class="board-empty">${q ? "没有匹配的会话" : (currentSection === null ? "还没有会话" : "这个分区还没有会话，新建一个。")}</div>`;
+    renderHome();
     return;
   }
-  const today = new Date(new Date().toDateString()) / 1000;
   const groups = [["今天", s => s.updated >= today], ["昨天", s => s.updated >= today - 86400], ["7 天内", s => s.updated >= today - 6 * 86400], ["更早", () => true]];
   const used = new Set();
-  let html = "", idx = 0;
+  let html = "";
   for (const [name, test] of groups) {
     const items = list.filter(s => !used.has(s.id) && test(s));
     if (!items.length) continue;
     items.forEach(s => used.add(s.id));
-    html += `<div class="sgroup">${name}</div>` + items.map(s => sessRow(s).replace('class="sess', `style="animation-delay:${Math.min(idx++, 12) * 18}ms" class="sess`)).join("");
+    html += `<div class="lb-group">${name}</div>` + items.map(s => sessRow(s)).join("");
   }
   $("sessions").innerHTML = html;
+  renderHome();
+}
+
+function boardRow(s) {
+  const [label, cls] = sessStatus(s);
+  const dur = s.duration_seconds ?? (s.created && s.updated ? s.updated - s.created : null);
+  const files = s.file_count;
+  return `<button class="board-row" data-open="${s.id}" type="button">
+      <span class="tm">${hm(s.updated)}</span>
+      <span><b>${esc(s.title)}</b><small>${fmtDuration(dur)} · ${files != null ? files + " 份" : "—"}</small></span>
+      <span class="st ${cls}">${label}</span>
+    </button>`;
+}
+
+function renderHomeKb() {
+  const box = $("colKb");
+  if (!box) return;
+  const data = window.KBDATA;
+  const start = new Date(new Date().toDateString()) / 1000;
+  const rows = data && Array.isArray(data.today_new) ? data.today_new : ((data && data.recent) || []).filter(r =>
+    r.exists !== false && r.created >= start && (r.note === "新建" || String(r.note || "").startsWith("Claude")));
+  if (!rows.length) {
+    box.innerHTML = `<div class="board-empty">今天还没有新增知识库内容</div>`;
+    return;
+  }
+  box.innerHTML = rows.map(r => `<button class="board-row" data-kbpath="${esc(r.path)}" type="button">
+      <span class="tm">${typeof r.created === "number" ? hm(r.created) : ""}</span>
+      <span><b>${esc(r.title || baseName(r.path || ""))}</b><small>${esc(r.type || r.note || "知识库")}</small></span>
+    </button>`).join("");
+}
+window.onKbLoaded = renderHomeKb;
+
+function renderHome() {
+  if (!$("dutyTitle")) return;
+  const today = new Date(new Date().toDateString()) / 1000;
+  const visible = sessions.filter(s => sectionMatch(s.section_id));
+  const pending = visible.filter(s => s.pending);
+  const running = visible.filter(s => s.running && !s.pending);
+  const items = pending.reduce((n, s) => n + (s.pending || 0), 0);
+  if (items) {
+    $("dutyTitle").textContent = `${items} 项待确认`;
+    $("dutySub").textContent = "点开第一列里的会话，同意或拒绝后再继续。";
+  } else if (running.length) {
+    $("dutyTitle").textContent = `${running.length} 个会话进行中`;
+    $("dutySub").textContent = "Claude 还在台式机上干活。";
+  } else {
+    $("dutyTitle").textContent = "今天没有待确认";
+    $("dutySub").textContent = "待确认的操作会出现在第一列。";
+  }
+  const d = new Date();
+  $("metaDate").textContent = `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
+  $("metaWho").textContent = me ? me.display_name : "—";
+  $("metaHost").textContent = location.host;
+  const root = (typeof F !== "undefined" && F.roots && F.roots[0]) || "";
+  $("metaDir").textContent = root ? root : "—";
+  $("metaDir").title = root;
+  $("metaConn").textContent = es && es.readyState === 1 ? "已连接" : (token ? "重新连接中" : "—");
+  const queue = [...pending, ...running];
+  $("colPending").innerHTML = queue.length ? queue.map(boardRow).join("") : `<div class="board-empty">没有待确认的操作</div>`;
+  const todays = visible.filter(s => s.updated >= today);
+  const active = todays.filter(s => s.pending || s.running);
+  const done = todays.filter(s => !s.pending && !s.running);
+  let todayHtml = active.map(boardRow).join("");
+  if (done.length) todayHtml += `<div class="board-empty">已完成 ${done.length}</div>`;
+  $("colToday").innerHTML = todays.length ? todayHtml : `<div class="board-empty">今天还没有会话</div>`;
+  renderHomeKb();
 }
 $("sessQ").addEventListener("input", renderSessions);
 
@@ -326,11 +579,19 @@ function renderTop() {
   const s = currentSess;
   const mine = isMine();
   $("title").textContent = s ? s.title : "新会话";
+  const [stLabel] = s ? sessStatus(s) : ["未开始", ""];
+  if ($("sessState")) $("sessState").textContent = stLabel;
+  if ($("sessSection")) {
+    $("sessSection").textContent = s ? (s.section_name || sessionSectionName(s.section_id)) : "—";
+    $("sessSection").disabled = !s || !mine;
+  }
+  if ($("msgCount")) $("msgCount").textContent = s ? String(s.message_count ?? messages.length) : "—";
+  if ($("permLabel")) $("permLabel").textContent = s && s.bypass ? "完全放行" : "标准 · 需确认";
   const running = !!(s && s.running);
   $("stopBtn").hidden = !running;
   $("sendBtn").hidden = running;
   $("cbox").classList.toggle("running", running);
-  $("bypassWrap").hidden = !me.can_bypass || (s && s.source === "voice") || !mine;
+  $("bypassWrap").hidden = !me.can_bypass || !mine;
   $("bypass").checked = !!(s && s.bypass);
   $("bypass").disabled = !s;
   $("bypassWrap").classList.toggle("on", !!(s && s.bypass));
@@ -339,13 +600,15 @@ function renderTop() {
   $("wdBtn").innerHTML = icon("folder", 13) + `<span>${esc(wd ? baseName(wd) : "默认工作目录")}</span>`;
   $("wdBtn").title = (wd || "默认工作目录") + "\n工作文件夹：Claude 在这个文件夹里干活。只能在会话开始前选";
   $("wdBtn").disabled = !mine || !!(s && s.claude_session);
-  $("ownerTag").innerHTML = s && !mine ? `${avatarEl(s.owner_avatar, 18)} ${esc(s.owner)}` : (s && s.bypass ? '<span class="tag warn">完全放行中</span>' : "");
+  const ownerHtml = s && !mine ? `${avatarEl(s.owner_avatar, 18)} ${esc(s.owner)}` : (s && s.bypass ? '<span class="tag warn">完全放行中</span>' : "");
+  $("ownerTag").innerHTML = ownerHtml;
+  $("ownerTag").hidden = !ownerHtml;
   $("ownerTag").style.cssText = "display:inline-flex;align-items:center;gap:6px";
   $("composer").hidden = !mine && !questions.length;
   $("cbox").hidden = questions.length > 0 || !mine;
   $("cfoot").hidden = questions.length > 0 || !mine;
   $("otherBanner").hidden = mine;
-  if (!mine) $("otherBanner").innerHTML = `${icon("eye", 16)}你在查看 <b>${esc(s.owner)}</b> 的会话${s.source === "voice" ? "（板子语音）" : ""}，只能看。待确认的操作可以代为处理。`;
+  if (!mine) $("otherBanner").innerHTML = `${icon("eye", 16)}你在查看 <b>${esc(s.owner)}</b> 的会话，只能看。待确认的操作可以代为处理。`;
   $("cfoot").textContent = s && s.bypass ? "完全放行已打开：所有操作都会直接执行，不再询问" : "Claude 在台式机上干活，重要的改动请再核对一遍";
   renderLinks();
 }
@@ -427,51 +690,46 @@ function renderMessages(force = false) {
   if (!me) return;
   renderTop();
   if (!messages.length && !live && !approvals.length) {
-    if (force || !$("list").querySelector(".welcome")) $("list").innerHTML = welcomeHtml();
+    $("list").innerHTML = `<div class="entry-empty">还没有记录。写下要交给 Claude 的事，发送后从这里开始。</div>`;
     return;
   }
-  const ownerAva = currentSess ? currentSess.owner_avatar : me.avatar;
-  // 最后一条 Claude 回答下面放“沉淀成经验”（自己的会话、没在运行时）
+  const whoOf = (meta, fallback) => (meta && meta.author) || fallback;
+  const sideOf = (t, who) => `<div class="side"><span class="tm">${t ? hm(t) : ""}</span><span class="who">${esc(who)}</span></div>`;
   const lastAi = isMine() && !live && !(currentSess && currentSess.running) && currentSess && currentSess.claude_session
     ? messages.map(m => m.role).lastIndexOf("assistant") : -1;
   let html = messages.map((m, mi) => {
     const meta = m.meta || {};
-    const isNew = !seen.has(m.id) ? " new" : "";
     if (m.role === "user") {
-      const tag = meta.bypass ? " · 完全放行" : "";
-      return `<div class="msg me${isNew}"><div class="me-col">${chipsHtml(meta)}<div class="bubble">${esc(m.content)}</div><div class="meta">${esc(meta.author || "")} · ${hm(m.created)}${tag}</div></div>${avatarEl(ownerAva, 32)}</div>`;
+      return `<div class="entry me">${sideOf(m.created, whoOf(meta, "交办"))}<div class="body">${chipsHtml(meta)}${esc(m.content)}</div></div>`;
     }
     if (m.role === "event" && meta.qa) {
       const qa = meta.qa;
-      return `<div class="msg qa${isNew}"><div class="qa-card"><div class="qa-h">${icon("chat", 13)}${esc(m.content)} · ${hm(m.created)}</div>
-        ${qa.questions.map((q, i) => { const a = (qa.answers || [])[i] || {}; const picks = [...(a.selected || []), ...(a.other ? ["其他：" + a.other] : [])];
-          return `<div class="qa-q">${esc(q.question)}</div><div class="qa-a">${picks.length ? picks.map(p => `<span class="chip">${esc(p)}</span>`).join("") : '<span class="muted">（没选）</span>'}${a.note ? `<span class="muted" style="font-size:12.5px">备注：${esc(a.note)}</span>` : ""}</div>`; }).join("")}
-      </div></div>`;
+      return `<div class="evt"><span>${esc(m.content)}</span></div>` + qa.questions.map((q, i) => {
+        const a = (qa.answers || [])[i] || {};
+        const picks = [...(a.selected || []), ...(a.other ? ["其他：" + a.other] : [])];
+        return `<div class="entry">${sideOf(m.created, "问答")}<div class="body"><b>${esc(q.question)}</b><div>${picks.length ? picks.map(p => esc(p)).join("、") : "（没选）"}${a.note ? ` · ${esc(a.note)}` : ""}</div></div></div>`;
+      }).join("");
     }
     if (m.role === "event") {
-      const kind = m.content.startsWith("✔") ? "ok" : (m.content.startsWith("✘") || m.content.startsWith("⌛")) ? "no" : "";
-      return `<div class="msg evt ${kind}${isNew}"><span>${icon(kind === "ok" ? "check" : kind === "no" ? "x" : "sparkle", 13)}${esc(m.content.replace(/^[✔✘⌛]\s*/, ""))}</span></div>`;
+      return `<div class="evt"><span>${esc(m.content.replace(/^[✔✘⌛]\s*/, ""))}</span></div>`;
     }
     const info = [meta.seconds != null ? meta.seconds + " 秒" : "", meta.cost ? "$" + meta.cost.toFixed(4) : ""].filter(Boolean).join(" · ");
     const body = m.role === "error" ? `<div class="errbox">${icon("alert", 17)}<div>${esc(m.content)}</div></div>` : `<div class="md">${md(m.content)}</div>`;
     const acts = mi === lastAi ? `<div class="ai-acts"><button class="aact" data-distill title="Claude 会把这次的做法整理成一条经验笔记，存进团队知识库">${icon("book", 14)}沉淀成经验</button></div>` : "";
-    return `<div class="msg ai${isNew}">${aiHead(m.created)}<div class="ai-body">${stepsDone(meta.tools)}${body}${info || acts ? `<div class="ai-foot">${info ? `<span class="meta">${info}</span>` : ""}${acts}</div>` : ""}</div></div>`;
+    return `<div class="entry">${sideOf(m.created, "Claude")}<div class="body">${stepsDone(meta.tools)}${body}${info ? `<div class="meta">${info}</div>` : ""}${acts}</div></div>`;
   }).join("");
   if (live) {
     const waiting = approvals.length > 0 || questions.length > 0;
-    html += `<div class="msg ai${seen.has("live") ? "" : " new"}">${aiHead(null, waiting ? "wait" : "busy")}<div class="ai-body">${stepsLive(live.tools, waiting)}<div class="md ${waiting ? "" : "typing"}">${md(live.text)}</div></div></div>`;
+    html += `<div class="entry">${sideOf(null, waiting ? "待确认" : "进行中")}<div class="body">${stepsLive(live.tools, waiting)}<div class="md ${waiting ? "" : "typing"}">${md(live.text)}</div></div></div>`;
   }
   html += approvals.map(a => `
-    <div class="ticket">
-      <div class="t-side">${orb(34, "wait")}</div>
-      <div class="t-main">
-        <div class="t-kick">需要你确认</div>
-        <div class="t-title">${esc(a.summary)}</div>
-        <pre>${approvalDetail(a)}</pre>
-        <div class="t-acts">
-          <button class="btn" data-deny="${a.id}">${icon("x", 15)}拒绝</button>
-          <button class="btn primary" data-allow="${a.id}">${icon("check", 15)}同意</button>
-        </div>
+    <div class="slip ticket">
+      <div class="kick">待确认</div>
+      <h4>${esc(a.summary)}</h4>
+      <pre>${approvalDetail(a)}</pre>
+      <div class="acts">
+        <button class="btn" data-deny="${a.id}">${icon("x", 15)}拒绝</button>
+        <button class="btn primary" data-allow="${a.id}">${icon("check", 15)}同意</button>
       </div>
     </div>`).join("");
   const box = $("messages");
@@ -512,18 +770,39 @@ $("list").addEventListener("click", e => {
 });
 
 async function loadSessions() {
-  sessions = await api("/api/sessions");
+  const qs = currentSection === null ? "" : `?section_id=${encodeURIComponent(currentSection)}`;
+  try { sessions = await api("/api/sessions" + qs); }
+  catch { sessions = await api("/api/sessions"); }
   renderSessions();
+}
+
+function setView(mode) {
+  viewMode = mode;
+  const home = mode === "home";
+  $("homeBoard").hidden = !home;
+  $("chatStage").hidden = home;
+  $("homeNav").classList.toggle("on", home);
+}
+
+function closeDrawer() {
+  $("side").classList.remove("open");
+}
+function openDrawer() {
+  $("side").classList.add("open");
+  const q = $("sessQ");
+  if (q) setTimeout(() => q.focus(), 30);
 }
 
 async function openSession(id) {
   current = id;
-  $("side").classList.remove("open");
+  closeDrawer();
   seen.clear(); liveSteps = 0;
   if (!id) {
     currentSess = null; messages = []; live = null; approvals = []; links = []; questions = [];
+    setView("chat");
     renderSessions(); renderMessages(true); renderAsk(); $("input").focus(); return;
   }
+  setView("chat");
   const data = await api("/api/sessions/" + id);
   if (current !== id) return;
   currentSess = data.session; messages = data.messages; live = data.live; approvals = data.approvals; questions = data.questions || [];
@@ -532,6 +811,14 @@ async function openSession(id) {
   $("messages").style.scrollBehavior = "auto";
   $("messages").scrollTop = $("messages").scrollHeight;
   $("messages").style.scrollBehavior = "";
+}
+
+function showHome() {
+  current = null; currentSess = null; messages = []; live = null; approvals = []; links = []; questions = [];
+  seen.clear(); liveSteps = 0;
+  setView("home");
+  closeDrawer();
+  renderSessions();
 }
 
 function upsertSession(s) {
@@ -561,7 +848,7 @@ function connect() {
   es = new EventSource("/api/events?token=" + encodeURIComponent(token));
   es.onopen = () => {
     $("conn").textContent = ""; loadSessions(); if (current) openSession(current);
-    if (!F.roots.length) api("/api/files").then(d => { F.roots = d.roots; F.office = d.office; renderMessages(); }).catch(() => {});
+    if (!F.roots.length) api("/api/files").then(d => { F.roots = d.roots; F.office = d.office; renderMessages(); renderHome(); }).catch(() => {});
   };
   es.onerror = () => {
     $("conn").textContent = "重新连接中";
@@ -572,7 +859,7 @@ function connect() {
     if (ev.type === "session") return upsertSession(ev.session);
     if (ev.type === "session_deleted") {
       sessions = sessions.filter(s => s.id !== ev.session_id); renderSessions();
-      if (current === ev.session_id) openSession(null);
+      if (current === ev.session_id) showHome();
       return;
     }
     const sid = ev.session_id || (ev.approval && ev.approval.session_id);
@@ -603,7 +890,7 @@ function connect() {
 
 async function ensureSession(title) {
   if (current) return current;
-  const s = await post("/api/sessions", { title: (title || "新会话").slice(0, 20), work_dir: composer.workDir || null });
+  const s = await post("/api/sessions", { title: (title || "新会话").slice(0, 20), work_dir: composer.workDir || null, section_id: currentSection });
   current = s.id; currentSess = s; messages = []; approvals = []; links = [];
   composer.workDir = "";
   upsertSession(s);
@@ -1060,15 +1347,15 @@ async function preview(e) {
       box.innerHTML = note + (kind === "md" ? `<div class="mdv md">${md(d.text)}</div>` : `<pre>${esc(d.text)}</pre>`);
     } else if (kind === "docx") {
       if (e.size > 50 * 1048576) return cannot("文件太大，不适合在这里预览。");
-      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
-      await loadScript("https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js");
+      await loadScript("/static/vendor/jszip.min.js");
+      await loadScript("/static/vendor/docx-preview.min.js");
       const blob = await fetch(url).then(r => r.ok ? r.blob() : Promise.reject(new Error("读取失败")));
       if (F.sel !== e.path) return;
       box.innerHTML = "";
       await docx.renderAsync(blob, box, null, { inWrapper: true, ignoreLastRenderedPageBreak: true });
     } else if (kind === "sheet") {
       if (e.size > 30 * 1048576) return cannot("表格太大，不适合在这里预览。");
-      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
+      await loadScript("/static/vendor/xlsx.full.min.js");
       const buf = await fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error("读取失败")));
       if (F.sel !== e.path) return;
       const wb = XLSX.read(buf, { type: "array", codepage: 936 });
@@ -1438,7 +1725,11 @@ async function openSkillDetail(name) {
     setTimeout(() => { const t = $("input"); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }, 50);
     toast("说清楚要改什么，Claude 会取出技能、改好后提交新版本给管理员审核", "info", 5000);
   };
-  body.querySelector("#sdUse").onclick = () => { closeDialog(); composer.skill = sk.name; renderComposerChips(); $("input").focus(); };
+  body.querySelector("#sdUse").onclick = () => {
+    closeDialog(); composer.skill = sk.name; renderComposerChips();
+    if (!current) { setView("chat"); renderMessages(true); }
+    $("input").focus();
+  };
   body.querySelector("#sdUp").onclick = () => { body.querySelector("#sdUpBox").hidden = !body.querySelector("#sdUpBox").hidden; };
   bindSkillUpload(body, "sdu", r => { toast(`已提交 ${r.name} 的新版本，等管理员审核`, "ok"); openSkillDetail(name); }, true);
   body.querySelectorAll("[data-vfiles]").forEach(b => b.onclick = async () => {
@@ -1461,7 +1752,7 @@ async function showMobile() {
   let lan;
   try { lan = await api("/api/lan"); } catch (e) { return toast(e.message, "err"); }
   const urls = lan.urls.length ? lan.urls : [location.origin];
-  try { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"); }
+  try { await loadScript("/static/vendor/qrcode.min.js"); }
   catch (e) { return toast(e.message, "err"); }
   const qrSvg = url => {
     const qr = qrcode(0, "H"); qr.addData(url); qr.make();
@@ -1524,7 +1815,7 @@ function renderPalette() {
   const acts = paletteActions().filter(a => !q || a[1].toLowerCase().includes(q));
   const ss = sessions.filter(s => !q || s.title.toLowerCase().includes(q)).slice(0, q ? 20 : 6);
   palItems = [...acts.map(a => ({ kind: "act", ic: a[0], label: a[1], hint: a[2], run: a[3] })),
-    ...ss.map(s => ({ kind: "sess", ic: s.source === "voice" ? "mic" : "chat", label: s.title, hint: rel(s.updated), run: () => openSession(s.id) }))];
+    ...ss.map(s => ({ kind: "sess", ic: "chat", label: s.title, hint: rel(s.updated), run: () => openSession(s.id) }))];
   palSel = Math.min(palSel, Math.max(0, palItems.length - 1));
   let html = "", lastKind = "";
   palItems.forEach((it, i) => {
@@ -1571,13 +1862,27 @@ document.addEventListener("keydown", e => {
     return;
   }
   $("skillPop").hidden = true; $("userMenu").hidden = true;
+  if ($("side").classList.contains("open")) closeDrawer();
 });
 
 // ---------- 事件绑定 ----------
 
+bindSectionBar();
 $("newBtn").onclick = () => { resetComposer(); openSession(null); };
-$("menuBtn").onclick = e => { e.stopPropagation(); $("side").classList.toggle("open"); };
-document.addEventListener("click", e => { if ($("side").classList.contains("open") && !e.target.closest("#side")) $("side").classList.remove("open"); });
+$("homeNav").onclick = () => showHome();
+$("homeBoard").addEventListener("click", e => {
+  const open = e.target.closest("[data-open]");
+  if (open) return openSession(open.dataset.open);
+  const kb = e.target.closest("[data-kbpath]");
+  if (kb && window.kbOpenPath) window.kbOpenPath(kb.dataset.kbpath);
+});
+$("menuBtn").onclick = e => {
+  e.stopPropagation();
+  if ($("side").classList.contains("open")) closeDrawer(); else openDrawer();
+};
+document.addEventListener("click", e => {
+  if ($("side").classList.contains("open") && !e.target.closest("#side") && !e.target.closest("#menuBtn")) closeDrawer();
+});
 $("sendBtn").onclick = send;
 $("stopBtn").onclick = () => current && post(`/api/sessions/${current}/stop`).then(() => toast("已发送停止指令"));
 $("stepsBtn").onclick = showSteps;
@@ -1585,6 +1890,7 @@ $("filesBtn").onclick = () => showFiles();
 $("paletteBtn").onclick = openPalette;
 $("refBtn").onclick = () => showFiles();
 $("wdBtn").onclick = () => showFiles(currentSess ? currentSess.work_dir : (composer.workDir || ""), "workdir");
+$("sessSection").onclick = pickSessionSection;
 $("bypass").onchange = async () => {
   const on = $("bypass").checked;
   if (on && !confirm("打开后，本会话里 Claude 的所有操作（包括删除文件、运行命令）都不再询问，直接执行。确定吗？")) {

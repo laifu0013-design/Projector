@@ -12,11 +12,4 @@ if exist .venv\Scripts\python.exe set "PY=.venv\Scripts\python.exe"
 if defined PYTHON set "PY=%PYTHON%"
 set PYTHONUTF8=1
 start "Claude 中心服务" cmd /k "%PY%" server.py
-if "%MCP_ENDPOINT%"=="" (
-  echo 没有填 MCP_ENDPOINT，只启动网页端，不连小智语音。
-  pause
-  exit /b 0
-)
-timeout /t 3 /nobreak >nul
-"%PY%" mcp_pipe.py claude_mcp.py
 pause

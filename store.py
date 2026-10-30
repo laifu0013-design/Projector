@@ -51,7 +51,6 @@ CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude
 PORT = int(os.environ.get("CENTER_PORT", "8080"))
 DISCOVERY_PORT = int(os.environ.get("DISCOVERY_PORT", "8090"))
 
-BOARD_USERNAME = "board"
 TOKEN_IDLE_DAYS = 90
 
 
@@ -177,8 +176,6 @@ AVATARS = ["orange", "lemon", "lime", "grapefruit", "peach", "cherry", "grape", 
 def avatar_of(u: dict) -> str:
     if u.get("avatar") in AVATARS:
         return u["avatar"]
-    if u.get("role") == "device":
-        return "orange"  # 板子就是小橙子
     return AVATARS[(u.get("id") or 0) % len(AVATARS)]
 
 def hash_password(pw: str) -> str:
@@ -206,32 +203,21 @@ def get_user(uid) -> dict | None:
     return db("SELECT * FROM users WHERE id=?", (uid,), one=True)
 
 
-def board_user() -> dict:
-    u = db("SELECT * FROM users WHERE username=?", (BOARD_USERNAME,), one=True)
-    if not u:
-        db("INSERT INTO users (username, display_name, pw_hash, role, created) VALUES (?,?,?,?,?)",
-           (BOARD_USERNAME, "板子", "", "device", time.time()))
-        u = db("SELECT * FROM users WHERE username=?", (BOARD_USERNAME,), one=True)
-    return u
-
-
 def first_admin() -> dict | None:
     return db("SELECT * FROM users WHERE role='admin' AND disabled=0 ORDER BY id LIMIT 1", one=True)
 
 
 def adopt_orphans() -> None:
-    """升级前没有账号的老会话：语音的给板子账号，其他给第一个管理员。"""
-    db("UPDATE sessions SET user_id=? WHERE user_id IS NULL AND source='voice'", (board_user()["id"],))
+    """升级前没有账号的老会话：统一归到第一个管理员。"""
     if admin := first_admin():
         db("UPDATE sessions SET user_id=? WHERE user_id IS NULL", (admin["id"],))
 
 
-board_user()
 adopt_orphans()
 
 
 def _load_internal_token() -> str:
-    """给 approval_mcp.py 和 claude_mcp.py 用的内部令牌，不给人用。"""
+    """给 approval_mcp.py 用的内部令牌，不给人用。"""
     path = DATA / "internal_token.txt"
     if not path.exists():
         path.write_text(secrets.token_urlsafe(24), encoding="utf-8")
@@ -262,7 +248,7 @@ def current_user(request: Request) -> dict:
         return INTERNAL
     row = db("SELECT u.*, t.last_used FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.token=?", (token,), one=True)
     now = time.time()
-    if not row or row["disabled"] or row["role"] == "device" or now - row["last_used"] > TOKEN_IDLE_DAYS * 86400:
+    if not row or row["disabled"] or now - row["last_used"] > TOKEN_IDLE_DAYS * 86400:
         raise HTTPException(401, "登录已失效，请重新登录")
     if now - row["last_used"] > 600:
         db("UPDATE tokens SET last_used=? WHERE token=?", (now, token))

@@ -3,7 +3,8 @@
 "use strict";
 
 const KB = { data: null, view: "home", type: "", tag: "", sel: null, note: null, editing: false, dirty: false,
-             results: null, graph: null, sky: null, graphData: null, hidden: new Set() };
+             results: null, graph: null, sky: null, graphData: null, hidden: new Set(),
+             section: "", sections: [], sectionsLoaded: false };
 const KB_TYPES = { 经验: "exp", 文件卡片: "card", 主题: "topic" };
 const kcls = t => KB_TYPES[t] || (t === "ghost" ? "ghost" : "other");
 const ktype = t => `<span class="ktype k-${kcls(t)}">${esc(t)}</span>`;
@@ -11,9 +12,58 @@ const WL_RE = /(!?)\[\[([^\[\]\n|#^]+)(#[^\[\]\n|]*)?(?:\|([^\[\]\n]*))?\]\]/g;
 
 // ---------- 数据 ----------
 
+async function kbLoadSections() {
+  try {
+    const d = await api("/api/sections");
+    KB.sections = Array.isArray(d) ? d : (d && d.sections) || [];
+  } catch { KB.sections = []; }
+  KB.sectionsLoaded = true;
+}
+
+function kbSectionMatch(n) {
+  if (!KB.section) return true;
+  if (KB.section === "__uncategorized__") return !n.section;
+  return n.section === KB.section;
+}
+
+function kbSectionBar() {
+  const box = $("kbSections");
+  if (!box) return;
+  const item = (val, label) => `<button type="button" data-ks="${esc(val)}" class="${KB.section === val ? "on" : ""}">${esc(label)}</button>`;
+  box.innerHTML = item("", "全部") + item("__uncategorized__", "未分类") +
+    KB.sections.filter(s => !s.archived).map(s => item(s.name, s.name)).join("");
+}
+
+function kbSectionOptions(selected) {
+  const opts = [`<option value=""${!selected ? " selected" : ""}>未分类</option>`];
+  const active = KB.sections.filter(s => !s.archived);
+  if (selected && !active.some(s => s.name === selected)) {
+    opts.unshift(`<option value="${esc(selected)}" selected>${esc(selected)}（已下架）</option>`);
+  }
+  for (const s of active) opts.push(`<option value="${esc(s.name)}"${s.name === selected ? " selected" : ""}>${esc(s.name)}</option>`);
+  return opts.join("");
+}
+
+async function kbSetSection(section) {
+  KB.section = section;
+  KB.results = null;
+  $("kbQ").value = "";
+  await kbLoad();
+  if (KB.view === "home") kbHome();
+  else if (KB.view === "notes") { kbFilterBar(); kbRenderList(); }
+  else if (KB.view === "graph") kbGraphView();
+}
+
 async function kbLoad() {
-  KB.data = await api("/api/kb");
-  $("kbCnt").textContent = KB.data.stats.total > 1 ? KB.data.stats.total : "";
+  if (!KB.sectionsLoaded) await kbLoadSections();
+  const qs = KB.section ? "?section=" + encodeURIComponent(KB.section) : "";
+  try { KB.data = await api("/api/kb" + qs); }
+  catch { KB.data = await api("/api/kb"); }
+  const count = KB.data.notes.filter(kbSectionMatch).length;
+  $("kbCnt").textContent = count > 1 ? count : "";
+  window.KBDATA = KB.data;
+  kbSectionBar();
+  window.onKbLoaded?.();
   return KB.data;
 }
 window.kbInit = () => kbLoad().catch(() => {});
@@ -80,15 +130,23 @@ function kbTab(view) {
   if (view === "graph") kbGraphView();
 }
 $("kbTabs").onclick = e => { const b = e.target.closest("[data-kt]"); if (b) { KB.results = null; $("kbQ").value = ""; kbTab(b.dataset.kt); } };
+$("kbSections").onclick = e => { const b = e.target.closest("[data-ks]"); if (b) kbSetSection(b.dataset.ks); };
 
 // ---------- 首页 ----------
 
 function kbHome() {
-  const d = KB.data, st = d.stats, bt = st.by_type;
-  const stale = d.notes.filter(n => n.source_state);
+  const d = KB.data;
+  const visible = d.notes.filter(kbSectionMatch);
+  const bt = {};
+  for (const n of visible) bt[n.type] = (bt[n.type] || 0) + 1;
+  const week = visible.filter(n => n.mtime >= Date.now() / 1000 - 7 * 86400).length;
+  const st = { total: visible.length, week };
+  const stale = visible.filter(n => n.source_state);
   const tiles = [["经验", bt["经验"] || 0, "exp", "做过的事和做法"], ["文件卡片", bt["文件卡片"] || 0, "card", "重要文件的摘要"],
                  ["主题", bt["主题"] || 0, "topic", "项目、客户、产品"], ["本周更新", st.week, "week", "7 天内新增或修改"]];
-  const feed = d.recent.length ? d.recent.map((r, i) => `
+  const visiblePaths = new Set(visible.map(n => n.path));
+  const recent = (d.recent || []).filter(r => visiblePaths.has(r.path));
+  const feed = recent.length ? recent.map((r, i) => `
       <div class="kh-ev ${r.exists ? "" : "gone"}" ${r.exists ? `data-kp="${esc(r.path)}"` : ""} style="animation-delay:${Math.min(i, 12) * 30}ms">
         <span class="kh-evd k-${kcls((d.notes.find(n => n.path === r.path) || {}).type)}"></span>
         <div><b>${esc(r.title)}</b><small>${esc(r.by_name)} · ${esc(r.note || "修改")} · ${rel(r.created)}</small></div>
@@ -133,7 +191,7 @@ async function kbSky() {
   KB.sky?.stop();
   const canvas = $("khSky");
   let data;
-  try { data = KB.data.stats.total >= 6 ? await api("/api/kb/graph") : null; } catch { data = null; }
+  try { data = KB.data.notes.filter(kbSectionMatch).length >= 6 ? await api("/api/kb/graph" + (KB.section ? "?section=" + encodeURIComponent(KB.section) : "")) : null; } catch { data = null; }
   if (!canvas.isConnected || KB.view !== "home") return;
   if (!data) {  // 笔记还少的时候，画一片装饰用的星空
     const types = ["经验", "文件卡片", "主题"], nodes = [], edges = [];
@@ -147,10 +205,13 @@ async function kbSky() {
 // ---------- 笔记列表 ----------
 
 function kbFilterBar() {
-  const d = KB.data, bt = d.stats.by_type;
+  const d = KB.data;
+  const visible = d.notes.filter(kbSectionMatch);
+  const bt = {};
+  for (const n of visible) bt[n.type] = (bt[n.type] || 0) + 1;
   const chip = (label, val, n) => `<button class="kf ${KB.type === val && !KB.results ? "on" : ""}" data-kf="${esc(val)}">${val ? `<i class="k-${kcls(val)}"></i>` : ""}${label}<small>${n}</small></button>`;
   $("kbFilter").innerHTML = (KB.results ? `<span class="kf on">${icon("search", 13)}“${esc($("kbQ").value.trim())}” 的结果<small>${KB.results.length}</small></span><button class="kf" data-kclear>${icon("x", 12)}清除</button>`
-    : chip("全部", "", d.stats.total) + Object.keys(KB_TYPES).map(t => chip(t, t, bt[t] || 0)).join(""))
+    : chip("全部", "", visible.length) + Object.keys(KB_TYPES).map(t => chip(t, t, bt[t] || 0)).join(""))
     + (KB.tag && !KB.results ? `<span class="kf tagf">#${esc(KB.tag)}<button data-kuntag>${icon("x", 12)}</button></span>` : "");
 }
 $("kbFilter").onclick = e => {
@@ -163,13 +224,13 @@ $("kbFilter").onclick = e => {
 function kbRenderList() {
   let items = KB.results;
   if (!items) {
-    items = KB.data.notes.filter(n => (!KB.type || n.type === KB.type) && (!KB.tag || n.tags.includes(KB.tag)));
+    items = KB.data.notes.filter(n => kbSectionMatch(n) && (!KB.type || n.type === KB.type) && (!KB.tag || n.tags.includes(KB.tag)));
   }
   $("kbList").innerHTML = items.length ? items.map((n, i) => `
     <div class="kbi k-${kcls(n.type)} ${n.path === KB.sel ? "sel" : ""} ${n.status === "过时" ? "old" : ""}" data-kp="${esc(n.path)}" style="animation-delay:${Math.min(i, 20) * 14}ms">
       <span class="kdot k-${kcls(n.type)}"></span>
       <div class="kbi-m"><b>${esc(n.title)}</b><small>${esc(KB.results ? n.snippet : (n.summary || n.type))}</small></div>
-      <span class="kbi-s">${n.source_state ? `<span class="tag warn" title="原文件改过">!</span>` : ""}${n.status === "过时" ? '<span class="tag">过时</span>' : ""}<span>${rel(n.mtime)}</span></span>
+      <span class="kbi-s">${n.section ? `<span class="tag">${esc(n.section)}</span>` : ""}${n.source_state ? `<span class="tag warn" title="原文件改过">!</span>` : ""}${n.status === "过时" ? '<span class="tag">过时</span>' : ""}<span>${rel(n.mtime)}</span></span>
     </div>`).join("")
     : `<div class="empty-note" style="padding:24px 12px;text-align:center">${KB.results ? "没有找到相关的笔记<br>换个说法试试，或者直接问 Claude" : "这里还没有笔记"}</div>`;
   $("kbList").querySelector(".sel")?.scrollIntoView({ block: "nearest" });
@@ -182,7 +243,7 @@ $("kbQ").addEventListener("input", () => {
   kbSearchTimer = setTimeout(async () => {
     if (!q) { KB.results = null; if (KB.view === "notes") { kbFilterBar(); kbRenderList(); } return; }
     try {
-      const d = await api("/api/kb/search?q=" + encodeURIComponent(q));
+      const d = await api("/api/kb/search?q=" + encodeURIComponent(q) + (KB.section ? "&section=" + encodeURIComponent(KB.section) : ""));
       if ($("kbQ").value.trim() !== q) return;
       KB.results = d.results;
       if (KB.view !== "notes") kbTab("notes"); else { kbFilterBar(); kbRenderList(); }
@@ -286,11 +347,13 @@ async function kbOpenPath(rel) {
   await openKB("notes");
   kbShow(rel);
 }
+window.kbOpenPath = kbOpenPath;
 
 // ---------- 编辑 ----------
 
 function kbEdit(d, preset = {}) {
   const n = d ? d.note : { title: preset.title || "", type: preset.type || "经验", tags: [], summary: "", body: "", source: "", mtime: 0 };
+  const curSec = d ? (n.section || "") : (KB.section && KB.section !== "__uncategorized__" ? KB.section : "");
   KB.editing = true; KB.dirty = false;
   $("kbNotes").classList.add("viewing");
   const types = [...Object.keys(KB_TYPES), ...(Object.keys(KB_TYPES).includes(n.type) ? [] : [n.type])];
@@ -308,6 +371,7 @@ function kbEdit(d, preset = {}) {
         <input class="ke-in" id="keTags" placeholder="标签，用逗号分开" value="${esc(n.tags.join("，"))}">
       </div>
       <input class="ke-in" id="keSum" placeholder="一句话摘要（可选）：这条笔记解决什么问题" value="${esc(n.summary)}" maxlength="200">
+      <select class="ke-section" id="keSection" title="分区">${kbSectionOptions(curSec)}</select>
       <input class="ke-in" id="keSrc" placeholder="原文件或文件夹的完整路径（文件卡片用，可选）" value="${esc(n.source || "")}" ${n.type === "文件卡片" ? "" : "hidden"}>
       <div class="ke-body">
         <textarea id="keBody" placeholder="正文，支持 Markdown：## 小标题、- 列表、**加粗**。&#10;输入 [[ 可以链接到其他笔记，比如 [[客户A]]。">${esc(n.body)}</textarea>
@@ -315,7 +379,8 @@ function kbEdit(d, preset = {}) {
       </div>
     </div>`;
   const dirty = () => { KB.dirty = true; };
-  $("kbView").querySelectorAll("input, textarea").forEach(el => el.addEventListener("input", dirty));
+  $("kbView").querySelectorAll("input, textarea, select").forEach(el => el.addEventListener("input", dirty));
+  $("keSection").addEventListener("change", dirty);
   $("keType").onclick = e => {
     const b = e.target.closest("[data-t]"); if (!b) return;
     $("keType").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
@@ -333,6 +398,7 @@ function kbEdit(d, preset = {}) {
       path: d ? n.path : "", title, type: $("keType").querySelector(".on").dataset.t,
       tags: $("keTags").value.split(/[,，、\s]+/).map(t => t.replace(/^#/, "").trim()).filter(Boolean),
       summary: $("keSum").value.trim(), body: $("keBody").value, base_mtime: d ? n.mtime : null,
+      section: $("keSection").value,
     };
     const src = $("keSrc").value.trim();
     if (src !== (n.source || "")) body.source = src;
@@ -428,7 +494,7 @@ async function kbGraphView() {
     return `<button class="gt ${KB.hidden.has(key) ? "" : "on"}" data-gt="${esc(key)}"><i class="k-${kcls(key)}"></i>${t}</button>`;
   }).join("")}<button class="gt" data-gfit>${icon("eye", 13)}看全部</button>`;
   $("kbLegend").textContent = "拖动画布移动，滚轮缩放，点圆点打开笔记";
-  try { KB.graphData = await api("/api/kb/graph"); } catch (e) { return toast(e.message, "err"); }
+  try { KB.graphData = await api("/api/kb/graph" + (KB.section ? "?section=" + encodeURIComponent(KB.section) : "")); } catch (e) { return toast(e.message, "err"); }
   if (KB.view !== "graph") return;
   kbGraphDraw();
 }
@@ -621,15 +687,22 @@ async function kbDistill() {
 window.kbDistill = kbDistill;
 
 // 文件库里点“整理进知识库”：新开一个会话让 Claude 写文件卡片
-function kbOrganize(paths, label) {
+async function kbOrganize(paths, label) {
+  if (!KB.sectionsLoaded) await kbLoadSections();
   const name = label || baseName(paths[0]);
+  const curId = currentSess?.section_id ?? (KB.section && KB.section !== "__uncategorized__"
+    ? (KB.sections.find(s => s.name === KB.section)?.id ?? 0) : 0);
+  const secOpts = [`<option value="0"${!curId ? " selected" : ""}>未分类</option>`]
+    .concat(KB.sections.filter(s => !s.archived).map(s => `<option value="${s.id}"${Number(curId) === Number(s.id) ? " selected" : ""}>${esc(s.name)}</option>`)).join("");
   dialog("整理进知识库", `
     <div class="kb-org">${orb(46)}<div>
       <p style="margin-top:0">Claude 会读一遍“<b>${esc(name)}</b>”，为重要的文件写<b>文件卡片</b>：摘要、关键信息（金额、日期、对方……）、原文件位置，并和相关的项目、客户连起来。</p>
       <p class="muted" style="font-size:13px;margin-bottom:0">会新开一个会话来做，你可以随时去看进度。文件夹很大时会先做最重要的 30 个文件。</p>
-    </div></div>`,
+    </div></div>
+    <select class="ke-section" id="orgSection" title="分区">${secOpts}</select>`,
     [{ label: "取消" }, { label: "开始整理", primary: true, icon: "book", onClick: async () => {
-      const s = await post("/api/sessions", { title: ("整理：" + name).slice(0, 20) });
+      const section_id = Number($("orgSection").value || 0);
+      const s = await post("/api/sessions", { title: ("整理：" + name).slice(0, 20), section_id });
       upsertSession(s);
       await post(`/api/sessions/${s.id}/messages`, { action: "organize", refs: paths });
       $("filesBox").classList.remove("show");
